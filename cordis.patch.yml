@@ -1,0 +1,5 @@
+# Bundle patch for @local/dsh-mcp-switch.
+# One Host row; its Client half renders the "MCP 服务" page in Settings.
+- insert:
+    - id: mcp-switch
+      name: '@local/dsh-mcp-switch'

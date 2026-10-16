@@ -1,0 +1,39 @@
+{
+  "name": "@local/dsh-mcp-switch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Harness 设置的「MCP 服务」页：逐个启用/停用本 profile 的 MCP 服务器，运行时热生效。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./icon.svg": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "meta": {
+    "title": "MCP 服务开关",
+    "description": "在设置里逐个开关 MCP 服务器（rea / gitnexus / superting 等），无需重启。"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  }
+}
