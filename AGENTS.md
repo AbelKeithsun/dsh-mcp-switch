@@ -1,6 +1,8 @@
 # AGENTS.md — dsh-mcp-switch 项目指令（含会话交接）
 
-> 本文件会被 DSH 注入到「以本目录为工作区」的会话上下文里（与 ops/AGENTS.md 同一机制）。
+> 本文件会被 DSH 注入到「以本目录（或其子目录）为工作区」的会话上下文里（与 ops/AGENTS.md 同一机制）。
+> 发现规则（DSH 源码 `@deepseek-ai/dsh-agent-instructions`）：从会话 cwd 沿 `AGENTS.md` / `CLAUDE.md`
+> 向上找到 git 根目录，链上每一层的同名文件都会被注入，另有全局层 `~/.dsh/AGENTS.md`。
 > 目标：**任何新会话读完本文件 + [`docs/HANDOFF.md`](docs/HANDOFF.md)，5 分钟内接手**，不需要翻聊天记录。
 > 稳定约定写在这里；版本号、发布情况、待办等会变的状态写在 HANDOFF。
 
