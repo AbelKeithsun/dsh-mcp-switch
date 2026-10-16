@@ -46,6 +46,13 @@ DSH profile 通过 `link:` 依赖指向本目录（`install_bundle` 写入），
 
 （GitHub 访问需走本机代理：`HTTPS_PROXY=http://127.0.0.1:7897`。）
 
+## 接手 / 参与开发
+
+- **[`AGENTS.md`](AGENTS.md)** — 项目级 agent 指令（DSH 会自动注入以本目录为工作区的会话）：
+  30 秒速览、启动自检命令、硬约定、验证矩阵、发版四步、会话交接纪律。
+- **[`docs/HANDOFF.md`](docs/HANDOFF.md)** — 交接日志（倒序）：每次会话做了什么、跑了什么验证、
+  当前版本与发布状态、未完成项、踩过的坑。**新会话先读它 + `git log`，不要依赖聊天记录。**
+
 ## DSH 版本兼容（升级前必读）
 
 ### 声明写在哪、谁在读
@@ -100,6 +107,8 @@ npm run compat -- 0.3.0-rc.1  # 升级前预演
 | `tests/compat.test.mjs` | 兼容声明回归：peer 范围存在、engines 与之一致、testedWith 合法、脚本退出码（5 项） |
 | `scripts/check-compat.mjs` | `npm run compat`：比对运行中的 DSH 版本与实测清单，未实测则打印复验清单并退出 1 |
 | `locale/{zh,en}.json` | 插件管理页用的展示文案 |
+| `AGENTS.md` | 项目级 agent 指令：启动自检、硬约定、验证矩阵、发版流程、交接纪律 |
+| `docs/HANDOFF.md` | 会话交接日志（倒序追加，状态类信息以它为准） |
 
 ## 测试
 
