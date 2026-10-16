@@ -1,9 +1,9 @@
 # dsh-mcp-switch — Harness 的「MCP 服务」开关页
 
+> GitHub: <https://github.com/AbelKeithsun/dsh-mcp-switch> · MIT
+
 在 DSH Web UI 的 **设置 → MCP 服务** 里逐个启用/停用本 profile 的 MCP 服务器，
 运行时热生效，不用重启 Harness。
-
-![页面位置](https://img.shields.io/badge/settings-MCP%20%E6%9C%8D%E5%8A%A1-247bbf)
 
 ## 它做什么
 
@@ -16,14 +16,31 @@
 ## 安装
 
 ```bash
-# 在 Harness 会话里用 plugin_manager 工具：
+git clone https://github.com/AbelKeithsun/dsh-mcp-switch.git
+# 然后在 Harness 会话里用 plugin_manager 工具：
 #   action: install_bundle
-#   target: /Users/mac/Documents/note/ops/dsh-mcp-switch
+#   target: <克隆下来的绝对目录，如 /Users/you/dsh-mcp-switch>
 ```
 
 安装会把包 `link:` 进 `$DSH_PROFILE_DIR/node_modules` 并把
 `@local/dsh-mcp-switch` 加入 `package.json` 的 `dsh.profile.bundles`；
-`cordis.patch.yml` 里新增一行 `mcp-switch`。它是本地包，不发布。
+`cordis.patch.yml` 里新增一行 `mcp-switch`。它是纯 JS 本地包，无依赖、无构建、不发布。
+
+安装后确认：`cordis_inspect_query`（client `Slots.listSubTree`，root `settings.section`）
+的 occupants 里应出现 `mcp-switch`。
+
+## 同步到 GitHub（维护者）
+
+本仓库的工作副本同时活在 ops 工作区的 `dsh-mcp-switch/` 子目录里，用 `git subtree`
+推送该子目录的独立历史，不引入嵌套仓库：
+
+```bash
+cd /Users/mac/Documents/note/ops
+git subtree push --prefix=dsh-mcp-switch \
+  https://github.com/AbelKeithsun/dsh-mcp-switch.git main
+```
+
+（GitHub 访问需走本机代理：`HTTPS_PROXY=http://127.0.0.1:7897`。）
 
 ## 目录
 
