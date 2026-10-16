@@ -35,7 +35,7 @@ git clone https://github.com/AbelKeithsun/dsh-mcp-switch.git
 推送该子目录的独立历史，不引入嵌套仓库：
 
 ```bash
-cd /Users/mac/Documents/note/ops
+cd <本仓库工作副本所在的 ops 工作区>
 git subtree push --prefix=dsh-mcp-switch \
   https://github.com/AbelKeithsun/dsh-mcp-switch.git main
 ```
