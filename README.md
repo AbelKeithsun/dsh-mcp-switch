@@ -42,6 +42,48 @@ git subtree push --prefix=dsh-mcp-switch \
 
 （GitHub 访问需走本机代理：`HTTPS_PROXY=http://127.0.0.1:7897`。）
 
+## DSH 版本兼容（升级前必读）
+
+### 声明写在哪、谁在读
+
+DSH 的兼容校验（`@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`）
+**只读 `package.json` 里 `peerDependencies` 中 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 的 semver 范围**；
+`engines` 与 `dsh.engines` 都不参与校验（仅生态/市场展示）。不声明 peer = 校验被完全跳过，
+未来任何 DSH 版本都会静默加载。本插件声明：
+
+| 字段 | 值 | 作用 |
+|---|---|---|
+| `peerDependencies["@deepseek-ai/dsh"]` | `^0.2.0-rc.2` | **DSH 读它做校验**：0.2.x 放行，0.3.0 起判定不兼容 |
+| `peerDependenciesMeta["@deepseek-ai/dsh"].optional` | `true` | 只影响包管理器实参（profile 已 `autoInstallPeers: false`），不影响 DSH 校验 |
+| `dsh.engines.dsh` | `^0.2.0-rc.2` | 与 peer 同步的展示用镜像 |
+| `dsh.testedWith` | `["0.2.0-rc.2"]` | **真正实测过的版本清单**，`npm run compat` 用它判定 |
+
+判定不兼容时的行为（源码实证）：该 bundle 的行被 **skip / disabled 并打印原因**，
+不会拖垮整个 profile 启动。修复二选一：更新本插件的声明，或用
+`dsh plugin allow-version` / 插件管理器的「精确版本豁免」显式接受风险
+（豁免是 `插件名@版本` × `运行版本` 的精确配对，记录在
+`$DSH_PROFILE_DIR/compatibility.json`）。
+
+### 升级 DSH 之后怎么迭代
+
+```bash
+npm run compat              # 自动探测运行版本；不在实测清单则退出码 1
+npm run compat -- 0.3.0-rc.1  # 升级前预演
+```
+
+退出码非 0 时，按脚本打印的清单复验这 5 个依赖面（任一变了就要改 `client.js` 并重新实测）：
+
+1. **客户端模块格式**：`window.__ModuleLoader__.load({ id, factory })`；
+2. **设置页槽位**：`settings.section` 是否还在、注册项 `{ id, order, label, locale, inject }` 是否仍被接受
+   （`cordis_inspect_query`，client `Slots.listSubTree`，root=`settings.section`）；
+3. **宿主 Remote**：`pluginManager.listPlugins` / `setPluginEnabled` 的签名与返回信封 `{ ok, value }`
+   （client `Service.listService`）；
+4. **事件名**：`plugin-manager/changed`、`connection/reset`；
+5. **端到端实测**：设置 → MCP 服务，关一个再开回来，确认 `application: applied`。
+
+全过之后：把新版本加进 `dsh.testedWith` → 按需放宽/收紧 `peerDependencies`
+→ 升 `version` → 提交并发新 Release（tag 指向最新提交）。
+
 ## 目录
 
 | 文件 | 作用 |
@@ -50,13 +92,16 @@ git subtree push --prefix=dsh-mcp-switch \
 | `cordis.patch.yml` | 插入宿主行 `mcp-switch` |
 | `index.js` | 宿主半边：不注册任何东西（操作全走已有 `pluginManager` Remote） |
 | `client.js` | 浏览器半边：`settings.section` 里注册 `MCP 服务` 页（order 16） |
-| `tests/client.test.mjs` | 行为测试：行过滤、命名回退、开关结果、错误路径、清理注册 |
+| `tests/client.test.mjs` | 行为测试：行过滤、命名回退、开关结果、错误路径、清理注册（6 项） |
+| `tests/compat.test.mjs` | 兼容声明回归：peer 范围存在、engines 与之一致、testedWith 合法、脚本退出码（5 项） |
+| `scripts/check-compat.mjs` | `npm run compat`：比对运行中的 DSH 版本与实测清单，未实测则打印复验清单并退出 1 |
 | `locale/{zh,en}.json` | 插件管理页用的展示文案 |
 
 ## 测试
 
 ```bash
-node --test tests/client.test.mjs
+npm test            # 11 项：客户端行为 6 + 兼容声明 5
+npm run compat      # 本机 DSH 版本是否在实测清单里
 ```
 
 测试用假的 `window.__ModuleLoader__` / React / 浏览器 ctx 跑真实的 `apply()` 与 store，
