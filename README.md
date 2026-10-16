@@ -29,16 +29,20 @@ git clone https://github.com/AbelKeithsun/dsh-mcp-switch.git
 安装后确认：`cordis_inspect_query`（client `Slots.listSubTree`，root `settings.section`）
 的 occupants 里应出现 `mcp-switch`。
 
-## 同步到 GitHub（维护者）
+## 开发（维护者）
 
-本仓库的工作副本同时活在 ops 工作区的 `dsh-mcp-switch/` 子目录里，用 `git subtree`
-推送该子目录的独立历史，不引入嵌套仓库：
+本仓库就是工作副本，位于 `~/Documents/workspace/open-source/dsh-mcp-switch`，
+与 GitHub 的 `origin/main` 常规同步（不再借助 `git subtree`）：
 
 ```bash
-cd <本仓库工作副本所在的 ops 工作区>
-git subtree push --prefix=dsh-mcp-switch \
-  https://github.com/AbelKeithsun/dsh-mcp-switch.git main
+npm test                       # 11 项
+npm run compat                 # 本机 DSH 版本是否在实测清单里
+git add -A && git commit -m "..." && git push origin main
 ```
+
+DSH profile 通过 `link:` 依赖指向本目录（`install_bundle` 写入），改动即时生效；
+但**替换已安装包的代码需要重启 dsh** 才会加载新的一代 JS 模块（插件管理器的
+`application: restart-required` 就是这个意思）。
 
 （GitHub 访问需走本机代理：`HTTPS_PROXY=http://127.0.0.1:7897`。）
 
