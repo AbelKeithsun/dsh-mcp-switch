@@ -88,13 +88,16 @@ git log --oneline -3; git status --short
 1. 改 `version`（并同步受影响的文档：README 兼容表、HANDOFF 当前状态）；
 2. `npm test` && `npm run compat` 全过；
 3. `git add -A && git commit && git push origin main`（GitHub 需 `HTTPS_PROXY=http://127.0.0.1:7897`）；
-4. **打 tag + 建 Release**：`gh release create vX.Y.Z --target main --title "…" --notes "…"`；
-   自检 tag 与 main 对齐：
+4. **打 tag + 建 Release**：`git tag -a vX.Y.Z -m "…" && git push origin vX.Y.Z`，再
+   `gh release create vX.Y.Z --target main --title "…" --notes-file …`；
+   自检 tag 与 main 对齐（**annotated tag 的 ref 指向 tag 对象，必须再解一层**）：
    ```bash
-   gh api repos/AbelKeithsun/dsh-mcp-switch/git/ref/tags/vX.Y.Z --jq '.object.sha[0:7]'
-   gh api repos/AbelKeithsun/dsh-mcp-switch/commits/main --jq '.sha[0:7]'
+   TAG_OBJ=$(gh api repos/AbelKeithsun/dsh-mcp-switch/git/ref/tags/vX.Y.Z --jq '.object.sha')
+   gh api repos/AbelKeithsun/dsh-mcp-switch/git/tags/$TAG_OBJ --jq '.object.sha[0:7]'   # tag 指向的 commit
+   gh api repos/AbelKeithsun/dsh-mcp-switch/commits/main --jq '.sha[0:7]'                # 发布瞬间应相等
+   gh release view vX.Y.Z --json url,isDraft,isPrerelease
    ```
-   （作者踩过"只发 npm 不打 tag"的坑，此项目同样要求 tag 与 Release 齐全。）
+   （作者踩过"只发 npm 不打 tag"的坑，此项目同样要求 tag 与 Release 齐全；发布后只允许 docs-only 提交在 main 上，tag 不追。）
 
 ## 7. 会话交接纪律（本项目的核心要求）
 

@@ -20,7 +20,12 @@
   - `GET /servers` 在 gitnexus/rea 停用状态下返回 `probe` 13/187 条；把 superting 临时停用后仍显示 probe 14 条（不再回退成"启用后自动读取"）；停用状态下对 superting 强制探测也成功（证明 `!!js` token 求值有效）。
   - 缓存文件 115,688 bytes；`grep -c 'Authorization\|Bearer\|SUPERTING_MCP_TOKEN'` → **0**（无 secret）。profile 补丁已还原到改动前备份，`diff` 为空；MCP 开关状态与开始时一致（gitnexus/rea 停用、superting 启用）。
   - **未验证**：页面视觉与自动探测在浏览器里的交互（无浏览器控制）。
-- **当前状态**：version **0.3.0**；运行中的 DSH 0.2.1-rc.2；**本次按发版四步发布 v0.3.0**（commit → push → tag `v0.3.0` → GitHub Release，Release 地址 <https://github.com/AbelKeithsun/dsh-mcp-switch/releases/tag/v0.3.0>）；发布后按 AGENTS 第 6 节自检 tag 与 main 对齐；探测缓存已含三台服务的真实清单（`~/.dsh/cache/mcp-switch/probe.json`）。
+- **当前状态**：version **0.3.0**；运行中的 DSH 0.2.1-rc.2；**已按发版四步发布**：
+  - 发布提交 `8259473`（feat：未开启即可预览），已 push 到 `origin/main`；
+  - annotated tag **`v0.3.0`**（tag 对象 `e23f19e` → 解引用 commit `8259473`，与发布时 main 一致）；
+  - GitHub Release 已建（非 draft、非 prerelease）：<https://github.com/AbelKeithsun/dsh-mcp-switch/releases/tag/v0.3.0>；
+  - 发布后仅追加一次 docs 提交（修正 AGENTS 第 6 节对 annotated tag 的自检命令），main 会因此领先 tag 一个 docs 提交，属预期；
+  - 探测缓存已含三台服务的真实清单（`~/.dsh/cache/mcp-switch/probe.json`）。
 - **未完成 & 下一步**：① 用户刷新页面确认「查看工具 / 读取中 / 重新读取 / 读取于时间」的视觉；② 若后续有 HTTP 服务需要 OAuth 交互授权，探测会报错，需要单独评估（本机 token 型配置不受影响）。
 - **坑**：
   1. **探测缓存也会被"逐个注销"坑到**：第一版把实时工具直接回写磁盘缓存，停用 superting 时每次 `tools/change` 都把更小的清单写进去，缓存从 14 变成 1。修复：只在**行仍启用**且清单**不缩小**（或配置指纹变了）时回写；实测停用后缓存保持 14，并有单测 `teardown events do not shrink the cached snapshot` 的同族用例。
