@@ -5,6 +5,59 @@
 
 ---
 
+## 2026-10-21 v0.3.0：未开启也能预览（独立探测 + 磁盘缓存），取代 v0.2.0 的"启用后才读"
+
+- **背景/目标**：用户指出上一版方向不对：开关只决定 Agent 侧挂不挂载 MCP 客户端，MCP 服务本身一直存在，**应该在开关之前就能看工具**；并且"读过一次就缓存，配置没变就引用"。v0.2.0 的"启用后才读"被否决（v0.2.0 从未提交/发布，直接由本版取代）。
+- **改了什么**：
+  - **`probe.js`（新，零依赖 MCP 探测客户端）**：`probeServer(config)` 自己连服务读 `tools/list`。stdio = spawn `command args…` 走换行分隔 JSON-RPC；streamable-http = POST JSON-RPC，兼容 JSON 与单次 SSE 响应；`initialize` → `notifications/initialized` → `tools/list`（支持 `nextCursor` 分页）；20s 超时、SIGTERM/SIGKILL 清理、stderr 尾部附进错误；协议版本先试 `2025-06-18` 再退 `2024-11-05`；只投影 `{name, description, parameters[{name,required}]}`。`configFingerprint` = 解析后配置（transport/command/args/cwd/env/url/headers）的 SHA-256。
+  - **`index.js`**：新增 `POST /api/mcp-switch/probe`（body `{entryId, force?}`）：未变配置命中磁盘缓存直接返回；否则探测、写缓存、返回。`GET /servers` 现在合并 `probe`（指纹匹配）与实时工具。缓存文件 `$DSH_HOME/cache/mcp-switch/probe.json`（只有工具元数据/时间/协议版本/指纹，**无 secret**），写入用 tmp+rename。关闭行没有 Fiber，配置里的 `!!js`（如 superting Bearer token）用 `entry.evaluate` 现算。实时工具回写缓存时增加"仅启用中 + 不缩小"保护（见坑）。两条路由都走同一回环/同源围栏。
+  - **`client.js`**：预览就绪后对"没有任何数据"的行**顺序自动探测**（不会一次 spawn 多个服务），每行显示 读取中 / 工具列表 / 读取失败原因 + 「重新读取」；数据来源优先级 = 实时 > 探测缓存 > 内存 last-seen；标注 `实时` / `读取于 <时间>` / `上次启用时读到`。
+  - 测试：新增 `tests/probe.test.mjs`（6 项，真实 stdio 子进程 + 本地 HTTP JSON/SSE fixture，`tests/fixtures/mcp-stdio-server.mjs`）；`tests/host.test.mjs` +5（探测读写缓存、配置变更失效、`!!js` 求值、探测围栏、实时回写）共 13 项；`tests/client.test.mjs` +2（未开启自动探测、失败重试）共 11 项。`package.json` version 0.3.0、`files` 加 `probe.js`、`test` 脚本加 probe 测试；README/AGENTS/`scripts/check-compat.mjs` 复验清单同步（第 5 项改为"预览/探测路由"）。
+- **验证（原始结论）**：
+  - `npm test` → **35/35 pass**；`npm run compat` → `0.2.1-rc.2` 在实测清单，exit 0。
+  - 运行中的 DSH（0.2.1-rc.2）实测 `POST /api/mcp-switch/probe`（三个服务都真实连过）：
+    `include:mcp-gitnexus`（当时停用）→ 13 tools、1.04s；`include:rea-mcp`（当时停用）→ **187 tools**、1.20s；`include:mcp-superting` → 14 tools、65ms（缓存命中）。协议均为 `2025-06-18`，serverInfo 分别为 gitnexus/1.6.6、rea/6.4.0、superting-local/2.0.15。
+  - `GET /servers` 在 gitnexus/rea 停用状态下返回 `probe` 13/187 条；把 superting 临时停用后仍显示 probe 14 条（不再回退成"启用后自动读取"）；停用状态下对 superting 强制探测也成功（证明 `!!js` token 求值有效）。
+  - 缓存文件 115,688 bytes；`grep -c 'Authorization\|Bearer\|SUPERTING_MCP_TOKEN'` → **0**（无 secret）。profile 补丁已还原到改动前备份，`diff` 为空；MCP 开关状态与开始时一致（gitnexus/rea 停用、superting 启用）。
+  - **未验证**：页面视觉与自动探测在浏览器里的交互（无浏览器控制）。
+- **当前状态**：version **0.3.0**；运行中的 DSH 0.2.1-rc.2；**本次按发版四步发布 v0.3.0**（commit → push → tag `v0.3.0` → GitHub Release，Release 地址 <https://github.com/AbelKeithsun/dsh-mcp-switch/releases/tag/v0.3.0>）；发布后按 AGENTS 第 6 节自检 tag 与 main 对齐；探测缓存已含三台服务的真实清单（`~/.dsh/cache/mcp-switch/probe.json`）。
+- **未完成 & 下一步**：① 用户刷新页面确认「查看工具 / 读取中 / 重新读取 / 读取于时间」的视觉；② 若后续有 HTTP 服务需要 OAuth 交互授权，探测会报错，需要单独评估（本机 token 型配置不受影响）。
+- **坑**：
+  1. **探测缓存也会被"逐个注销"坑到**：第一版把实时工具直接回写磁盘缓存，停用 superting 时每次 `tools/change` 都把更小的清单写进去，缓存从 14 变成 1。修复：只在**行仍启用**且清单**不缩小**（或配置指纹变了）时回写；实测停用后缓存保持 14，并有单测 `teardown events do not shrink the cached snapshot` 的同族用例。
+  2. **关闭行的配置里有 `!!js`**：Loader 只在 Fiber 上有 resolved config；关闭行必须递归把 `{__jsExpr}` 交给 `entry.evaluate()` 求值，否则 superting 的 Bearer token 会变成对象/空值。已用"停用 superting 后强制探测成功"实测。
+  3. **自动探测要顺序执行**：三个服务里 rea 有 187 个工具、Gitnexa/rea 是真实子进程，并发探测会同时 spawn；页面用串行 `await`。
+  4. **stdio 必须确保 kill**：探测成功/失败/超时都要 `SIGTERM` 后 500ms `SIGKILL`，否则测试与 Host 会留下子进程。
+  5. **HTTP 有 JSON 和 SSE 两种合法响应**：只读 `response.json()` 会在 SSE 下失败；`probe.js` 分别处理，并流式读 SSE 避免长连接挂住。
+  6. **rea 工具多**：187 个工具让 GET payload ≈ 123KB，本机无感；若以后服务特别多，可考虑分页/懒加载（未做）。
+  7. 备份：`~/.dsh/profiles/desktop/cordis.patch.yml.bak-20261021-210623`（本次所有实验的原始基线）；验证中的临时副本在 `/tmp/cordis-*`。回滚：把 `.bak-20261021-210623` 覆盖回 `cordis.patch.yml`。
+
+---
+
+## 2026-10-21 v0.2.0：MCP 工具预览（只读 Host 路由 + 每行可展开的工具清单）
+
+- **背景/目标**：用户有了 MCP 开关页，但开关前看不到每个 MCP 服务器提供哪些服务（工具），"打开/关闭心里没底"。要在设置页里预览每个服务的工具清单。
+- **改了什么**：
+  - `index.js`（宿主半边，从 `apply(){}` 改为一条只读路由）：`GET /api/mcp-switch/servers`；`ctx.loader.entries()` 取 `@deepseek-ai/dsh-mcp-client` 行（`serverName` / `transport` / `entryId`），`ctx.tools.schemas()` 按 `mcp__<serverName>__` 前缀映射工具（name / description / 参数名）；内存 `lastSeen` 快照缓存（`tools/change` 监听 + 激活时预热）；回环围栏（socket 回环 + Host 回环 + `Sec-Fetch-Site`/`Origin` 同源检查）；只返回工具元数据，**不发 env/headers/args/cwd/URL**。
+  - `client.js`：store 增加 `loadPreview()`（fetch 路由）、`localStorage` 快照（key `dsh.mcp-switch.preview.v1`）、`previewForEntry()`（按 entryId / serverName / patchId 关联）、开关后 1.2s/3s 重试预览；`Row` 增加"查看工具 · N"折叠列表（工具名、参数名与必填标记、描述）、停用服务显示"上次启用时读到"的缓存清单；新增 `mcps-preview*` / `mcps-tool*` 样式（只用 `--dsw-alias-*` token）与 zh/en 文案。
+  - `tests/host.test.mjs`（新，8 项）：工具映射与参数、secret 不泄漏、停用后缓存、`tools/change` 预热、关停时逐个注销不收缩缓存、回环/跨站/方法围栏、loader 故障 500。
+  - `tests/client.test.mjs` +3 项（预览读取/持久化、缓存回退、路由不可用不影响开关）；`package.json` `test` 脚本加 host 测试；`version` 0.1.1→0.2.0；`dsh.testedWith` 加 `0.2.1-rc.2`；README/AGENTS/`scripts/check-compat.mjs` 复验清单同步（新增第 5 项"预览路由"）。
+- **验证**（原始结论）：
+  - `npm test` → 22/22 pass；`npm run compat` → 运行版本 `0.2.1-rc.2` 在实测清单，exit 0。
+  - 运行中的 DSH（0.2.1-rc.2，desktop profile）已加载新 Host 代码（改 profile 补丁触发 recomposition）：
+    `curl http://127.0.0.1:57765/api/mcp-switch/servers` → 200，`superting` live 14 个工具、`gitnexus`/`rea` 因本来就停用而为 0；`curl -H 'Host: 192.168.1.50:57765'` → 403，`Sec-Fetch-Site: cross-site` → 403，`Origin: http://evil.example` → 403，`POST` → 405。
+  - 真实开关（经 profile 补丁 `- id: mcp-superting\n  disabled: true` 触发 Loader dispose，与 `setPluginEnabled` 写补丁同一路径）：关掉后 `enabled=false, live=0, cached=14`；去掉覆盖后可回 `enabled=true, live=14, cached=0`。之后 profile 补丁已还原到备份，`diff` 为空，MCP 状态与开始时一致（gitnexus/rea 停用、superting 启用）。
+  - **未验证**：页面视觉（无浏览器控制；Playwright 访问该 GUI 需鉴权）。需用户刷新页面后目测「设置 → MCP 服务」的工具折叠与缓存标签。
+- **当前状态**：version 0.2.0；运行中的 DSH 0.2.1-rc.2；**未提交/未推送/未打 tag**（等用户确认 UI 后再按发版四步走）。
+- **未完成 & 下一步**：① 用户刷新页面确认视觉与交互（展开/收起、停用后的"上次启用时"标签）；② 确认后 commit + push（`HTTPS_PROXY=http://127.0.0.1:7897`）+ tag `v0.2.0` + GitHub Release；③ 可选：给 `gitnexus` / `rea` 各启用一次，让预览缓存有数据（当前从未在本进程内启用过，所以显示"启用后自动读取"）。
+- **坑**：
+  1. **HMR 不监视链接包源码**：desktop 的 hmr `root: []`，改 `index.js`/`client.js` 不会自动重载；改一行 profile 补丁触发 recomposition 才会重新加载"文件已变化"的链接包（本会话实测）。客户端页面刷新后拿新 bundle。
+  2. **工具是逐个注销的**：停用一个 MCP 服务时每次 unregister 都发 `tools/change`，天真的缓存会被中间态覆盖成 1 个工具（本会话实测踩到）；现在"收缩的 live 集合不覆盖快照，只有 0→live 的新一代或增长才更新"，并有单测守住。
+  3. **exact 路由在 `/api` 鉴权前缀之前匹配**：`/api/mcp-switch/servers` 不会经过 DSH 的 `/api` 鉴权，所以必须自带 loopback/同源围栏（照 dsh-ssh 的做法）。
+  4. **缓存只在"该 Host 进程里启用过"时才有**：当前 gitnexus/rea 本来就停用，预览对它们只能显示"启用后自动读取"；`localStorage` 快照也只记录页面见过的服务。
+  5. 相关备份：`~/.dsh/profiles/desktop/cordis.patch.yml.bak-20261021-210623`（改动前原始）、`.bak-20261021-210651-before-toggle-test`、`.bak-20261021-2106*-before-toggle-test2`；回滚任一 `.bak-*` 覆盖回 `cordis.patch.yml` 即可。
+
+---
+
 ## 2026-10-16 项目从 ops 迁到 workspace/open-source（ops 只放运维信息）
 
 - **背景/目标**：用户要求 `~/Documents/note/ops` 只存放运维信息，不存放具体项目代码；本项目迁到 `~/Documents/workspace/open-source/dsh-mcp-switch`。

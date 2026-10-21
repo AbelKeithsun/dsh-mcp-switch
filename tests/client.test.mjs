@@ -212,3 +212,318 @@ test('the page registers its cleanup and follows the Host change events', async 
   assert.ok(labels.includes('mcp-switch: store'))
   assert.ok(labels.includes('mcp-switch: host invalidations'))
 })
+
+/** Text content of a fake React element tree, rendering function components. */
+function textOf(node) {
+  if (node === null || node === undefined || node === false || node === true) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(textOf).join(' ')
+  if (typeof node === 'object') {
+    if (typeof node.type === 'function') {
+      return textOf(node.type({ ...node.props, children: node.children }))
+    }
+    return textOf(node.children)
+  }
+  return ''
+}
+
+/** Answer the preview route with a fixed payload; returns the fetch calls. */
+function stubPreview(payload, status = 200) {
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push([String(url), init])
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => payload,
+      text: async () => JSON.stringify(payload),
+    }
+  }
+  return calls
+}
+
+/** Minimal localStorage stand-in. */
+function stubStorage(initial = {}) {
+  const map = new Map(Object.entries(initial))
+  globalThis.localStorage = {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, value),
+    removeItem: (key) => map.delete(key),
+  }
+}
+
+/** Remove the browser globals a test installed. */
+function clearBrowserStubs(saved) {
+  if (saved.fetch === undefined) delete globalThis.fetch
+  else globalThis.fetch = saved.fetch
+  if (saved.localStorage === undefined) delete globalThis.localStorage
+  else globalThis.localStorage = saved.localStorage
+}
+
+/** The preview payload one enabled server would answer with. */
+function supertingPreview() {
+  return {
+    ok: true,
+    route: '/api/mcp-switch/servers',
+    servers: [
+      {
+        entryId: 'include:mcp-superting',
+        serverName: 'superting',
+        transport: 'streamable-http',
+        enabled: true,
+        tools: [
+          {
+            name: 'list_notes',
+            description: 'List notes',
+            parameters: [{ name: 'limit', required: false }],
+          },
+          {
+            name: 'search_notes',
+            description: 'Search notes by keyword',
+            parameters: [],
+          },
+        ],
+      },
+    ],
+  }
+}
+
+test('the preview reads each server tool list from the Host route', async () => {
+  const saved = { fetch: globalThis.fetch, localStorage: globalThis.localStorage }
+  try {
+    stubStorage()
+    const calls = stubPreview(supertingPreview())
+    const { store, Component } = await mount({
+      pluginManager: {
+        listPlugins: async () => ({
+          ok: true,
+          value: [
+            pluginInfo('include:mcp-superting', MCP, {
+              patchId: 'mcp-superting',
+            }),
+          ],
+        }),
+      },
+    })
+    await store.load()
+    await store.loadPreview()
+
+    const state = store.getSnapshot()
+    assert.equal(state.previewStatus, 'ready')
+    assert.equal(state.previewError, '')
+    assert.equal(calls[0][0], '/api/mcp-switch/servers')
+    assert.equal(calls[0][1].credentials, 'same-origin')
+    assert.equal(state.preview['include:mcp-superting'].tools.length, 2)
+    assert.equal(state.preview['include:mcp-superting'].tools[1].name, 'search_notes')
+
+    // The toast-free summary is visible without expanding the row.
+    const page = textOf(Component({ t: (key) => key, store }))
+    assert.match(page, /showTools · 2/)
+
+    // The last live snapshot is persisted for the next page load.
+    const cached = JSON.parse(globalThis.localStorage.getItem('dsh.mcp-switch.preview.v1'))
+    assert.deepEqual(
+      cached['include:mcp-superting'].tools.map((tool) => tool.name),
+      ['list_notes', 'search_notes'],
+    )
+  } finally {
+    clearBrowserStubs(saved)
+  }
+})
+
+test('a disabled server shows the cached snapshot with its age label', async () => {
+  const saved = { fetch: globalThis.fetch, localStorage: globalThis.localStorage }
+  try {
+    stubStorage({
+      'dsh.mcp-switch.preview.v1': JSON.stringify({
+        'include:mcp-superting': {
+          serverName: 'superting',
+          tools: [{ name: 'list_notes', description: 'List notes', parameters: [] }],
+          asOf: 1700000000000,
+        },
+      }),
+    })
+    stubPreview({ ok: false, error: 'forbidden: loopback-only' }, 403)
+    const { store, Component } = await mount({
+      pluginManager: {
+        listPlugins: async () => ({
+          ok: true,
+          value: [
+            pluginInfo('include:mcp-superting', MCP, {
+              patchId: 'mcp-superting',
+              enabled: false,
+            }),
+          ],
+        }),
+      },
+    })
+    await store.load()
+    await store.loadPreview()
+
+    assert.equal(store.getSnapshot().previewStatus, 'unavailable')
+    const page = textOf(Component({ t: (key) => key, store }))
+    assert.match(page, /showTools · 1 · cachedNote/)
+    assert.match(page, /previewUnavailable/)
+  } finally {
+    clearBrowserStubs(saved)
+  }
+})
+
+test('an unreachable preview route never disables the switches', async () => {
+  const saved = { fetch: globalThis.fetch, localStorage: globalThis.localStorage }
+  try {
+    stubStorage()
+    stubPreview({ ok: false }, 401)
+    let enabled = false
+    const { store } = await mount({
+      pluginManager: {
+        listPlugins: async () => ({
+          ok: true,
+          value: [
+            pluginInfo('include:rea-mcp', MCP, { patchId: 'rea-mcp', enabled }),
+          ],
+        }),
+        setPluginEnabled: async (entryId, next) => {
+          enabled = next
+          return { ok: true, value: { application: 'applied' } }
+        },
+      },
+    })
+    await store.load()
+    await store.loadPreview()
+    assert.equal(store.getSnapshot().previewStatus, 'unavailable')
+    assert.match(store.getSnapshot().previewError, /401/)
+
+    await store.toggle('include:rea-mcp', true)
+    const state = store.getSnapshot()
+    assert.equal(state.notice, 'applied')
+    assert.equal(state.error, '')
+    assert.equal(state.servers[0].enabled, true)
+  } finally {
+    clearBrowserStubs(saved)
+  }
+})
+
+/** Poll until a predicate holds (the page's auto-probe runs asynchronously). */
+async function waitFor(predicate, timeout = 3000) {
+  const started = Date.now()
+  while (Date.now() - started < timeout) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error('timed out waiting for ' + predicate)
+}
+
+/** Answer the preview route and the probe route with fixed payloads. */
+function stubPreviewAndProbe({ servers, probe }) {
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url)
+    const method = init.method ?? 'GET'
+    calls.push([target, method])
+    if (target.endsWith('/api/mcp-switch/servers')) {
+      const payload = { ok: true, servers }
+      return { ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) }
+    }
+    if (target.endsWith('/api/mcp-switch/probe')) {
+      const payload =
+        probe.error !== undefined
+          ? { ok: false, error: probe.error }
+          : { ok: true, source: 'probe', probe: probe.probe }
+      return {
+        ok: probe.error === undefined,
+        status: probe.error === undefined ? 200 : 502,
+        json: async () => payload,
+        text: async () => JSON.stringify(payload),
+      }
+    }
+    throw new Error('unexpected fetch ' + target)
+  }
+  return calls
+}
+
+test('a server that was never enabled is probed and previewed before the switch', async () => {
+  const saved = { fetch: globalThis.fetch, localStorage: globalThis.localStorage }
+  try {
+    stubStorage()
+    const calls = stubPreviewAndProbe({
+      servers: [
+        {
+          entryId: 'include:mcp-fixture',
+          serverName: 'fixture',
+          transport: 'stdio',
+          enabled: false,
+          tools: [],
+        },
+      ],
+      probe: {
+        probe: {
+          tools: [{ name: 'alpha', description: 'First fixture tool', parameters: [] }],
+          probedAt: 1700000000000,
+          serverInfo: { name: 'fixture-stdio', version: '1.2.3' },
+          protocolVersion: '2025-06-18',
+        },
+      },
+    })
+    const { store, Component } = await mount({
+      pluginManager: {
+        listPlugins: async () => ({
+          ok: true,
+          value: [pluginInfo('include:mcp-fixture', MCP, { patchId: 'mcp-fixture', enabled: false })],
+        }),
+      },
+    })
+    await store.load()
+    await store.loadPreview()
+    await store.autoProbe()
+    await waitFor(() => store.getSnapshot().probes['include:mcp-fixture']?.status === 'ready')
+
+    const page = textOf(Component({ t: (key) => key, store }))
+    assert.match(page, /showTools · 1/)
+    assert.match(page, /probedAt/)
+    assert.ok(calls.some(([, method]) => method === 'POST'), 'the page must probe without enabling the server')
+    assert.equal(store.getSnapshot().servers[0].enabled, false)
+  } finally {
+    clearBrowserStubs(saved)
+  }
+})
+
+test('a failed probe surfaces its reason and offers a retry', async () => {
+  const saved = { fetch: globalThis.fetch, localStorage: globalThis.localStorage }
+  try {
+    stubStorage()
+    stubPreviewAndProbe({
+      servers: [
+        {
+          entryId: 'include:mcp-fixture',
+          serverName: 'fixture',
+          transport: 'stdio',
+          enabled: false,
+          tools: [],
+        },
+      ],
+      probe: { error: 'probe: could not start server: ENOENT' },
+    })
+    const { store, Component } = await mount({
+      pluginManager: {
+        listPlugins: async () => ({
+          ok: true,
+          value: [pluginInfo('include:mcp-fixture', MCP, { patchId: 'mcp-fixture', enabled: false })],
+        }),
+      },
+    })
+    await store.load()
+    await store.loadPreview()
+    await store.probe('include:mcp-fixture', true)
+    await waitFor(() => store.getSnapshot().probes['include:mcp-fixture']?.status === 'error')
+
+    const page = textOf(Component({ t: (key) => key, store }))
+    assert.match(page, /probeFailed/)
+    assert.match(page, /ENOENT/)
+    assert.match(page, /reread/)
+    // The switch itself stays usable.
+    assert.equal(store.getSnapshot().servers[0].locked, false)
+  } finally {
+    clearBrowserStubs(saved)
+  }
+})

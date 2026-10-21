@@ -99,14 +99,18 @@ if (tested.includes(runtime.version)) {
 
 console.log(`\n结果          ✘ ${runtime.version} 不在实测清单里 —— 升级后需要复验再放宽声明。`)
 console.log(`
-复验清单（任一接口变了就要改 client.js 并重新实测）：
+复验清单（任一接口变了就要改代码并重新实测）：
   1. 客户端模块格式：window.__ModuleLoader__.load({ id, factory }) 是否仍是浏览器半边的加载约定。
   2. 设置页 slot：cordis_inspect_query（client, provider=Slots, method=listSubTree, input={"root":"settings.section"}）
      是否仍接受注册项 { id, order, label, locale, inject }，以及 settings.section 这个槽位名是否还在。
   3. 宿主 Remote：cordis_inspect_query（client, provider=Service, method=listService）
      里 pluginManager 的 listPlugins / setPluginEnabled 签名，以及返回信封 { ok, value } 是否没变。
   4. 事件名：plugin-manager/changed、connection/reset。
-  5. 实测：设置 → MCP 服务，关一个再开回来（或 plugin_manager set_plugin include:<patchId>），确认 application=applied。
-  6. 全过之后：把 ${runtime.version} 加进 dsh.testedWith、按需调整 peerDependencies、升 version、发 Release；
+  5. 预览/探测路由：webServer.register({kind:'exact',path,handler})、tools.schemas()、loader.entries()、
+     entry.fiber.config 仍可用；GET /api/mcp-switch/servers 返回 200 且 servers[].tools 是数组；
+     POST /api/mcp-switch/probe {entryId} 能返回该服务的工具数组（未开启的服务也可以）。
+  6. 实测：设置 → MCP 服务，关一个再开回来（或 plugin_manager set_plugin include:<patchId>），
+     确认 application=applied，关闭状态下仍能查看工具（探测缓存）。
+  7. 全过之后：把 ${runtime.version} 加进 dsh.testedWith、按需调整 peerDependencies、升 version、发 Release；
      未复验又想先跑，用 dsh plugin allow-version 或插件管理器授"精确版本豁免"（记在 $DSH_PROFILE_DIR/compatibility.json）。`)
 process.exit(1)

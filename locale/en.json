@@ -1,4 +1,4 @@
 {
   "title": "MCP server switches",
-  "description": "Enable or disable individual MCP servers from Settings; changes apply live."
+  "description": "Preview the tools each MCP server provides (no need to enable it first), then enable or disable it from Settings; changes apply live."
 }
