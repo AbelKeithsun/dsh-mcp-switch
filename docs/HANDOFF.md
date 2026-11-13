@@ -29,8 +29,15 @@
   - `GET /api/mcp-switch/servers` → 200，三行齐全（gitnexus/rea 停用、superting 启用，与开始时一致）。
   - profile 补丁已还原：`diff cordis.patch.yml cordis.patch.yml.bak-20261113-before-compat-toggle` → **空**（与本会话开始时逐字一致）。备份：`~/.dsh/profiles/desktop/cordis.patch.yml.bak-20261113-before-compat-toggle`。
   - **未验证**：页面视觉（无浏览器控制）。
-- **当前状态**：version **0.4.0**；运行中的 DSH **0.2.2-rc.2**；发布结果见下方「发布」小节。
-- **未完成 & 下一步**：见「发布」小节。
+- **当前状态**：version **0.4.0**；运行中的 DSH **0.2.2-rc.2**；**已按发版四步发布**：
+  - 发布提交 `bd9ce13`（feat：上下文 token 估算 + 语言包元信息 + 修启用行 !!js 未求值），已 push 到 `origin/main`；
+  - annotated tag **`v0.4.0`**（tag 对象 `597235d` → 解引用 commit `bd9ce13`，与发布时 main 一致，自检通过）；
+  - GitHub Release 已建（非 draft、非 prerelease）：<https://github.com/AbelKeithsun/dsh-mcp-switch/releases/tag/v0.4.0>；
+  - 本次发布含此前未提交的 v0.4.0 全部改动（token 估算）+ 本日的语言包/compat/探测修复。
+- **未完成 & 下一步**：
+  1. 用户刷新插件管理页确认标题变成「MCP 服务开关」，刷新设置页确认 token 徽标/明细/能力/说明的视觉（页面视觉本会话无浏览器控制，未验证）；
+  2. 另一台 Linux 机（107.131）上的插件源码仍是旧 locale 结构，需同步本仓库这批改动（重新拷目录**必须**带 `tar --exclude='._*'`，或直接 `git pull`）；
+  3. `rea` 的 133K 是真实量级（187 工具），说明"先预览再决定开关"的价值；若嫌总量大，可考虑工具级 allow-list（当前不做，超出边界）。
 - **坑**：
   1. **`entry.fiber.config` 是原始输入，不是解析后的配置**：DSH 0.2.2 里 `fiber.config` 保留 `!!js` 节点，只有 `fiber.effectiveConfig` 是插值后的。本插件曾用 `fiber.config` → 启用行的 header 变成 `[object Object]` → 401。**读配置一律走 `entry.options.config` + 自己求值**（与停用行同路径）。
   2. **这个 bug 只在「启用行 + `!!js` + HTTP 认证」三者同时成立时显形**：停用行走求值路径没事；stdio 没有 header 也没事；DSH 0.2.1 的 `fiber.config` 语义不同（那时是解析后的）所以升级后才暴露。**升级 DSH 后必须重新跑一遍三个服务的真实探测**。
