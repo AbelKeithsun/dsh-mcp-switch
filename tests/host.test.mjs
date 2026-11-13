@@ -389,18 +389,30 @@ test('POST probe reads a disabled server tool list and persists it for GET', asy
   assert.deepEqual(answer.body.probe.tools.map((tool) => tool.name), ['alpha', 'beta'])
   assert.equal(answer.body.probe.serverInfo.name, 'fixture-stdio')
   assert.ok(answer.body.probe.probedAt > 0)
+  assert.ok(answer.body.probe.tokens.tools > 0)
+  assert.ok(answer.body.probe.tokens.instructions > 0)
+  assert.equal(
+    answer.body.probe.tokens.total,
+    answer.body.probe.tokens.tools + answer.body.probe.tokens.instructions,
+  )
+  assert.deepEqual(answer.body.probe.capabilities, { tools: true, resources: true })
+  assert.match(answer.body.probe.instructions.preview, /Fixture instructions/)
 
   const file = join(home, 'cache', 'mcp-switch', 'probe.json')
   assert.equal(existsSync(file), true)
   const cached = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(cached.version, 2)
   assert.deepEqual(cached.entries['include:mcp-fixture'].tools.map((tool) => tool.name), ['alpha', 'beta'])
   assert.equal(typeof cached.entries['include:mcp-fixture'].fingerprint, 'string')
+  assert.ok(cached.entries['include:mcp-fixture'].tokens.total > 0)
 
   // GET merges the persisted probe; the payload carries tools only, no config.
   const list = call(routes[0])
   const row = list.body.servers[0]
   assert.deepEqual(row.probe.tools.map((tool) => tool.name), ['alpha', 'beta'])
   assert.equal(row.enabled, false)
+  assert.ok(row.probe.tokens.tools > 0)
+  assert.ok(row.probe.tokens.instructions > 0)
   const raw = JSON.stringify(list.body)
   for (const forbidden of ['command', 'args', 'env', 'fixture-stdio.mjs']) {
     assert.equal(raw.includes(forbidden), false, `payload leaked ${forbidden}`)
@@ -456,6 +468,40 @@ test('the probe route resolves !!js config expressions for disabled rows', async
   assert.ok(evaluated.length >= 3)
 })
 
+test('the probe route resolves !!js config expressions for running rows too', async () => {
+  // A running row's fiber keeps the **raw** patch config: `!!js` nodes are
+  // still `{ __jsExpr }` objects there (DSH 0.2.2 `fiber.config` is the raw
+  // input; only `fiber.effectiveConfig` is interpolated). Reading that raw
+  // copy would send the header value as "[object Object]" and every
+  // authenticated server would answer 401.
+  const evaluated = []
+  const rawConfig = {
+    serverName: 'fixture',
+    transport: { __jsExpr: '"stdio"' },
+    command: { __jsExpr: 'process.execPath' },
+    args: { __jsExpr: `[${JSON.stringify(fixture)}]` },
+  }
+  const rows = [
+    {
+      id: 'include:mcp-running-expr',
+      disabled: false,
+      fiber: { config: rawConfig },
+      evaluate(expr) {
+        evaluated.push(expr)
+        return eval(expr)
+      },
+      options: { name: MCP, config: rawConfig },
+    },
+  ]
+  const { routes } = mountHost({ entries: rows, schemas: [] })
+  const answer = await callAsync(probeRoute(routes), {
+    body: JSON.stringify({ entryId: 'include:mcp-running-expr' }),
+  })
+  assert.equal(answer.body.ok, true, JSON.stringify(answer.body))
+  assert.deepEqual(answer.body.probe.tools.map((tool) => tool.name), ['alpha', 'beta'])
+  assert.ok(evaluated.length >= 3)
+})
+
 test('the probe route fences methods, peers and bad requests', async () => {
   const { routes } = mountHost({ entries: [fixtureEntry()], schemas: [] })
   const route = probeRoute(routes)
@@ -482,5 +528,12 @@ test('GET folds live tools into the probe cache so a later disable still preview
   assert.ok(call(routes[0]).body.servers[0].cached)
   const file = join(home, 'cache', 'mcp-switch', 'probe.json')
   assert.equal(existsSync(file), true)
-  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).entries['include:mcp-fixture'].tools.map((row) => row.name), ['alpha'])
+  const stored = JSON.parse(readFileSync(file, 'utf8')).entries['include:mcp-fixture']
+  assert.deepEqual(stored.tools.map((row) => row.name), ['alpha'])
+  assert.equal(
+    stored.tokens.tools,
+    Math.ceil(JSON.stringify([
+      { name: 'mcp__fixture__alpha', description: 'First fixture tool', parameters: { type: 'object', properties: {} } },
+    ]).length / 4) + 4,
+  )
 })

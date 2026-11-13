@@ -39,8 +39,9 @@ stdin.on('data', (chunk) => {
         id: message.id,
         result: {
           protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
-          capabilities: { tools: { listChanged: false } },
+          capabilities: { tools: { listChanged: false }, resources: { subscribe: false } },
           serverInfo: { name: 'fixture-stdio', version: '1.2.3' },
+          instructions: 'Fixture instructions: use alpha first, then beta.',
         },
       })
       continue

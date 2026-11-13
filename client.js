@@ -69,6 +69,14 @@ window.__ModuleLoader__.load({
       reread: 'Read again',
       probedAt: 'read at',
       probeLive: 'live',
+      tokensEstimate: 'context cost',
+      tokensUnit: 'tokens',
+      tokenBreakdownTools: 'tool schemas',
+      tokenBreakdownInstructions: 'server instructions',
+      capabilities: 'capabilities',
+      instructionsHeading: 'Server instructions',
+      enabledTotal: 'Enabled servers cost about',
+      estimateHint: 'estimated at 4 characters per token (DSH token-meter heuristic); the provider tokenizer is authoritative',
       stateOn: 'Enabled',
       stateOff: 'Disabled',
       stateLocked: 'Managed elsewhere',
@@ -109,6 +117,14 @@ window.__ModuleLoader__.load({
       reread: '重新读取',
       probedAt: '读取于',
       probeLive: '实时',
+      tokensEstimate: '上下文占用',
+      tokensUnit: 'tokens',
+      tokenBreakdownTools: '工具 schema',
+      tokenBreakdownInstructions: '服务说明',
+      capabilities: '能力',
+      instructionsHeading: '服务说明',
+      enabledTotal: '已启用服务约占用',
+      estimateHint: '按 DSH token-meter 的固定启发式（4 字符/token）估算，实际以模型 tokenizer 为准',
       stateOn: '已启用',
       stateOff: '已停用',
       stateLocked: '不可在此管理',
@@ -192,7 +208,48 @@ window.__ModuleLoader__.load({
         name: raw.name,
         description: typeof raw.description === 'string' ? raw.description : '',
         parameters,
+        tokens: Number(raw.tokens) || 0,
       };
+    }
+
+    /** Normalize one token estimate. */
+    function normalizeTokens(raw) {
+      if (!isRecord(raw)) return { tools: 0, instructions: 0, total: 0 };
+      const tools = Number(raw.tools) || 0;
+      const instructions = Number(raw.instructions) || 0;
+      return { tools, instructions, total: Number(raw.total) || tools + instructions };
+    }
+
+    /** Normalize one probe payload (from GET cache or a fresh POST). */
+    function normalizeProbe(raw) {
+      if (!isRecord(raw)) return void 0;
+      const tools = Array.isArray(raw.tools) ? raw.tools.map(normalizeTool).filter(Boolean) : [];
+      const tokens = normalizeTokens(raw.tokens);
+      if (tools.length === 0 && tokens.total === 0) return void 0;
+      return {
+        tools,
+        tokens,
+        instructionsKnown: raw.instructionsKnown === true,
+        capabilities: isRecord(raw.capabilities) ? raw.capabilities : {},
+        instructions: isRecord(raw.instructions)
+          ? {
+              preview: typeof raw.instructions.preview === 'string' ? raw.instructions.preview : '',
+              chars: Number(raw.instructions.chars) || 0,
+              tokens: Number(raw.instructions.tokens) || 0,
+            }
+          : { preview: '', chars: 0, tokens: 0 },
+        probedAt: Number(raw.probedAt) || 0,
+        protocolVersion: typeof raw.protocolVersion === 'string' ? raw.protocolVersion : '',
+        serverInfo: isRecord(raw.serverInfo) ? raw.serverInfo : {},
+      };
+    }
+
+    /** Compact token count: 950 → "950", 2400 → "2.4K", 48000 → "48K". */
+    function formatTokens(value) {
+      const tokens = Math.max(0, Math.round(Number(value) || 0));
+      if (tokens < 1000) return String(tokens);
+      if (tokens < 100000) return String(Math.round(tokens / 100) / 10).replace(/\.0$/, '') + 'K';
+      return String(Math.round(tokens / 1000)) + 'K';
     }
 
     /** Normalize one server row from the Host preview payload. */
@@ -213,6 +270,7 @@ window.__ModuleLoader__.load({
           cachedRaw !== void 0 && cachedTools.length > 0
             ? { tools: cachedTools, asOf: Number(cachedRaw.asOf) || 0 }
             : void 0,
+        probe: normalizeProbe(raw.probe),
       };
     }
 
@@ -442,20 +500,16 @@ window.__ModuleLoader__.load({
           if (!response.ok || !isRecord(body) || body.ok !== true || !isRecord(body.probe)) {
             throw new Error(isRecord(body) && typeof body.error === 'string' ? body.error : 'HTTP ' + response.status);
           }
-          const tools = Array.isArray(body.probe.tools)
-            ? body.probe.tools.map(normalizeTool).filter(Boolean)
-            : [];
+          const probe = normalizeProbe(body.probe);
+          if (probe === void 0) throw new Error('probe payload is empty');
           if (disposed) return;
           emit({
             probes: {
               ...state.probes,
               [entryId]: {
+                ...probe,
                 status: 'ready',
-                tools,
-                probedAt: Number(body.probe.probedAt) || Date.now(),
-                serverInfo: isRecord(body.probe.serverInfo) ? body.probe.serverInfo : {},
-                protocolVersion:
-                  typeof body.probe.protocolVersion === 'string' ? body.probe.protocolVersion : '',
+                probedAt: probe.probedAt || Date.now(),
               },
             },
           });
@@ -475,8 +529,12 @@ window.__ModuleLoader__.load({
         if (state.probes[entry.entryId] !== void 0) return false;
         const preview = previewForEntry(entry, state);
         if (preview === void 0) return true;
-        if ((preview.tools?.length ?? 0) > 0) return false;
-        if ((preview.probe?.tools?.length ?? 0) > 0) return false;
+        if ((preview.probe?.tools?.length ?? 0) > 0) {
+          // A live-only fold prices tool schemas but cannot know the server
+          // instructions; probe once to complete the estimate.
+          return preview.probe.instructionsKnown !== true;
+        }
+        if ((preview.tools?.length ?? 0) > 0) return true;
         if ((preview.cached?.tools?.length ?? 0) > 0) return false;
         return true;
       }
@@ -573,6 +631,13 @@ window.__ModuleLoader__.load({
                   )
                 : null,
             ),
+            tool.tokens > 0
+              ? h(
+                  'span',
+                  { className: 'mcps-tool-tokens', title: t('estimateHint') },
+                  '≈' + formatTokens(tool.tokens) + ' ' + t('tokensUnit'),
+                )
+              : null,
             tool.description !== ''
               ? h('p', { className: 'mcps-tool-desc' }, tool.description)
               : null,
@@ -623,6 +688,15 @@ window.__ModuleLoader__.load({
               ? t('cachedNote') + ' ' + formatTime(preview?.cached?.asOf)
               : '';
       const transport = preview?.transport ?? '';
+      const tokens = probedMeta?.tokens;
+      const capabilities = isRecord(probedMeta?.capabilities)
+        ? Object.keys(probedMeta.capabilities)
+        : [];
+      const instructions = probedMeta?.instructions;
+      const tokenSummary =
+        tokens !== void 0 && tokens.total > 0
+          ? '≈' + formatTokens(tokens.total) + ' ' + t('tokensUnit')
+          : '';
       return h(
         'li',
         { className: 'mcps-row' },
@@ -641,6 +715,16 @@ window.__ModuleLoader__.load({
             ),
             h('code', { className: 'mcps-code' }, entry.entryId ?? entry.key),
             transport !== '' ? h('code', { className: 'mcps-code' }, transport) : null,
+            tokenSummary !== ''
+              ? h(
+                  'span',
+                  { className: 'mcps-tokens', title: t('estimateHint') },
+                  t('tokensEstimate') + ' ' + tokenSummary,
+                )
+              : null,
+            capabilities.map((capability) =>
+              h('code', { className: 'mcps-code mcps-cap', key: 'cap-' + capability }, capability),
+            ),
           ),
           h(
             'div',
@@ -657,6 +741,7 @@ window.__ModuleLoader__.load({
                   (open ? t('hideTools') : t('showTools')) +
                     ' · ' +
                     tools.length +
+                    (tokenSummary !== '' ? ' · ' + tokenSummary : '') +
                     (sourceLabel !== '' ? ' · ' + sourceLabel : ''),
                 )
               : loading
@@ -714,7 +799,37 @@ window.__ModuleLoader__.load({
                         )
                       : null,
                   ),
+                  tokens !== void 0 && tokens.total > 0
+                    ? h(
+                        'div',
+                        { className: 'mcps-token-breakdown', title: t('estimateHint') },
+                        tokenSummary +
+                          ' = ' +
+                          t('tokenBreakdownTools') +
+                          ' ≈' +
+                          formatTokens(tokens.tools) +
+                          ' + ' +
+                          t('tokenBreakdownInstructions') +
+                          ' ≈' +
+                          formatTokens(tokens.instructions),
+                      )
+                    : null,
                   h(ToolList, { tools, t }),
+                  instructions !== void 0 && instructions.preview !== ''
+                    ? h(
+                        'div',
+                        { className: 'mcps-instructions' },
+                        h(
+                          'div',
+                          { className: 'mcps-tools-head' },
+                          t('instructionsHeading') +
+                            (instructions.tokens > 0
+                              ? ' · ≈' + formatTokens(instructions.tokens) + ' ' + t('tokensUnit')
+                              : ''),
+                        ),
+                        h('p', { className: 'mcps-instructions-text' }, instructions.preview),
+                      )
+                    : null,
                 )
               : null,
           ),
@@ -741,6 +856,18 @@ window.__ModuleLoader__.load({
       const servers = state.servers;
       const refreshing = state.status === 'refreshing';
       const previewDown = state.previewStatus === 'unavailable' && servers.length > 0;
+      // Token estimate of the servers that are currently enabled: their tool
+      // schemas plus server instructions enter every request of the sessions
+      // this profile runs.
+      const enabledTokens = servers.reduce((sum, entry) => {
+        if (!entry.enabled) return sum;
+        const probeState = state.probes[entry.entryId];
+        const tokens =
+          probeState?.status === 'ready'
+            ? probeState.tokens
+            : previewForEntry(entry, state)?.probe?.tokens;
+        return sum + (tokens?.total ?? 0);
+      }, 0);
       return h(
         'section',
         { className: 'mcps-section' },
@@ -775,6 +902,13 @@ window.__ModuleLoader__.load({
                 }),
               ),
             ),
+        enabledTokens > 0
+          ? h(
+              'p',
+              { className: 'mcps-token-total', title: t('estimateHint') },
+              t('enabledTotal') + ' ≈' + formatTokens(enabledTokens) + ' ' + t('tokensUnit'),
+            )
+          : null,
         h(
           'div',
           { className: 'mcps-footer' },
@@ -829,6 +963,13 @@ window.__ModuleLoader__.load({
       '.mcps-tool{display:flex;flex-direction:column;gap:2px}',
       '.mcps-tool-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}',
       '.mcps-tool-name{font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:6px;padding:1px 6px}',
+      '.mcps-tool-tokens{font-size:11px;color:var(--dsw-alias-label-secondary)}',
+      '.mcps-tokens{font-size:12px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:1px 8px;white-space:nowrap}',
+      '.mcps-cap{font-size:10px;padding:0 5px}',
+      '.mcps-token-breakdown{font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.mcps-token-total{margin:0;font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.mcps-instructions{display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px;margin-top:2px}',
+      '.mcps-instructions-text{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}',
       '.mcps-tool-params{font-size:11px;color:var(--dsw-alias-label-secondary)}',
       '.mcps-tool-desc{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word}',
       '.mcps-switch{position:relative;flex:none;margin-top:2px;width:36px;height:20px;padding:0;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);cursor:pointer;transition:background .15s ease,border-color .15s ease}',

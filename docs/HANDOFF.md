@@ -5,6 +5,100 @@
 
 ---
 
+## 2026-11-13 v0.4.0：修「启用行的 `!!js` 配置没求值」→ 探测 401（发布 v0.4.0）
+
+- **背景/目标**：用户要求「提交推送并打 tag」，并给出 superting 的 token。核对 token 时发现它**与 profile 里内联的 token 完全相同**（`grep` 一致），且用同一 token 直连 `http://127.0.0.1:8220/mcp` → **200**、`serverInfo=superting-local/2.0.15`、返回 instructions；而插件的探测却稳定报 `initialize failed with HTTP 401` → **不是 token 过期，是插件的 bug**。
+- **根因（源码 + 实测双证）**：DSH 0.2.2 的 Loader 把 `!!js` 表达式节点 `{__jsExpr: "..."}` 保留在**两处**：
+  - `entry.options.config`（原始补丁配置）；
+  - `entry.fiber.config`（**原始**输入，不是解析后的）。
+
+  只有 `fiber.effectiveConfig` 才是插值后的副本（`cordis-plugin-loader/src/index.ts:104-110` 的 `internal/config` 钩子里 `interpolate(fiber.ctx, config)`）。
+
+  本插件 `resolveServerConfig()` 之前优先取 `entry.fiber?.config` —— 对**启用行**拿到的就是还带着 `{__jsExpr}` 的原始对象，于是 `headers.Authorization` 被当成对象塞进 HTTP 头，Node `fetch` 把它字符串化成 **`[object Object]`** → 服务器 401。
+  **停用行**反而没事：没有 fiber，走 `interpolateConfig()` 用 `entry.evaluate()` 求值了。
+- **改了什么**：
+  - **`index.js` `resolveServerConfig()`**：改为**优先**用 `entry.options?.config` + `interpolateConfig(entry, raw)`（对启用/停用行同一条路径，指纹稳定），仅当没有 `options.config` 时才回退 `entry.fiber?.effectiveConfig`。
+  - **`tests/host.test.mjs`**：新增 1 项「the probe route resolves !!js config expressions for running rows too」——构造一个 `fiber.config` 与 `options.config` 都带 `{__jsExpr}` 的启用行，断言探测能跑通。**已验证该测试在旧逻辑下失败（13 pass / 1 fail）、新逻辑下通过（14 pass）**。
+  - **`AGENTS.md` / `README.md`**：测试数 42→43、宿主路由 13→14 项。
+- **验证（原始结论）**：
+  - `npm test` → **43/43 pass**；`npm run compat` → exit 0（`运行中的 DSH 0.2.2-rc.2 ← 安装清单 app-boot`），`✔ 0.2.2-rc.2 在实测清单里`。
+  - **抓到现场证据**（临时起一个本地 echo MCP server + 在 profile 里临时插一行 `mcp-echo`，事毕全部还原）：echo server 记录到 `Authorization: "Bearer a6a6…"`（DSH 自己的 MCP 客户端发的，**正确**）与 `Authorization: "[object Object]"`（本插件的探测发的，**错误**）——同一份配置、两条路径，一眼定位。
+  - 修复后在**运行中的 DSH 0.2.2-rc.2** 上重测（改一行 profile 补丁触发 recomposition 让链接包重新载入）：
+    `POST /api/mcp-switch/probe {"entryId":"include:mcp-superting","force":true}` → **200**、14 tools、`tokens={"tools":1221,"instructions":347,"total":1568}`、instructions 1344 字符（此前是 502/401，且缓存里 superting 的 `instructionsKnown` 一直是 `false`）。
+    三个服务全部 200：superting 14 tools/1568 tokens、gitnexus 13 tools/5671、rea 187 tools/133064。
+  - `GET /api/mcp-switch/servers` → 200，三行齐全（gitnexus/rea 停用、superting 启用，与开始时一致）。
+  - profile 补丁已还原：`diff cordis.patch.yml cordis.patch.yml.bak-20261113-before-compat-toggle` → **空**（与本会话开始时逐字一致）。备份：`~/.dsh/profiles/desktop/cordis.patch.yml.bak-20261113-before-compat-toggle`。
+  - **未验证**：页面视觉（无浏览器控制）。
+- **当前状态**：version **0.4.0**；运行中的 DSH **0.2.2-rc.2**；发布结果见下方「发布」小节。
+- **未完成 & 下一步**：见「发布」小节。
+- **坑**：
+  1. **`entry.fiber.config` 是原始输入，不是解析后的配置**：DSH 0.2.2 里 `fiber.config` 保留 `!!js` 节点，只有 `fiber.effectiveConfig` 是插值后的。本插件曾用 `fiber.config` → 启用行的 header 变成 `[object Object]` → 401。**读配置一律走 `entry.options.config` + 自己求值**（与停用行同路径）。
+  2. **这个 bug 只在「启用行 + `!!js` + HTTP 认证」三者同时成立时显形**：停用行走求值路径没事；stdio 没有 header 也没事；DSH 0.2.1 的 `fiber.config` 语义不同（那时是解析后的）所以升级后才暴露。**升级 DSH 后必须重新跑一遍三个服务的真实探测**。
+  3. **`!!js` 里的 `process.env.X ?? '字面量'` 求值发生在 Host 进程**，本机 `SUPERTING_MCP_TOKEN` 未设置 → 实际用的是内联字面量 token；token 轮换要改 profile 补丁或设置环境变量后重启 DSH。
+  4. **`npm run compat` 之前读的是桌面外壳版本**（0.2.2-rc.1）而非 CLI 版本（0.2.2-rc.2），已修（见上一条 2026-11-13 记录）。
+  5. **让运行中的 DSH 重新载入链接包源码**：HMR 比较 profile 补丁的**内容**（不是 mtime），`touch` 无效；要**改一行内容**（本会话用追加一行注释）才会 recomposition。改完记得把那一行删回去。
+
+---
+
+## 2026-11-13 v0.4.0（同一次发布的前半）：语言包元信息 + AppleDouble 防护 + compat 版本探测修正 + 0.2.2-rc.2 复验
+
+- **背景/目标**：另一台 Linux 机器（`/workspace/utils/plugins/dsh-mcp-switch`，从本机 macOS 整目录拷过去）报「包元信息错误」，根因是拷贝带进了 macOS 的 AppleDouble 旁注文件 `locale/._en.json`，而 DSH 0.2.2 的语言包加载器把 `locale/` 下**每个** `*.json` 都当语言字典并要求文件名是合法语言 id。用户要求本项目自查「有没有需要修复的地方」。
+- **改了什么**：
+  - **`locale/en.json` / `locale/zh.json`**：加 `meta.title` / `meta.description`（DSH 0.2.2+ 只认 `meta`；平铺键保留给更早的加载器）。改前真实加载器返回 `title.en = "@local/dsh-mcp-switch"`（回退成包名），改后 `title = {en:"MCP server switches", zh:"MCP 服务开关"}`。
+  - **`package.json`**：`files` 里 `locale/*.json` → 显式 `locale/en.json` / `locale/zh.json`（通配正是垃圾文件进包的通道）；`dsh.testedWith` 增加 `0.2.2-rc.2`；`test` 脚本加 `tests/locale.test.mjs`。
+  - **`.gitignore`**：加 `._*`（AppleDouble 旁注文件）。
+  - **`scripts/check-compat.mjs`**：版本探测改为读**运行中的 DSH CLI 版本**（`$DSH_INSTALL_DIR/../dsh-app-boot/package.json`；在 `app.asar` 里用 `$DSH_NODE_EXECUTABLE` + `ELECTRON_RUN_AS_NODE` 读），再退回 CLI 包清单，最后才退回 `runtime.json` 的外壳版本并标注「可能与 CLI 不同」。改前本机报的是外壳版本 0.2.2-rc.1（假警报），改后是 CLI 版本 0.2.2-rc.2。同时修正注释：**顶层** `engines.dsh` 一票决定、`dsh.engines` 只用于展示、semver 比较带 `includePrerelease`。
+  - **`tests/locale.test.mjs`**（新，6 项）：locale 目录只允许 en/zh 且文件名是合法语言 id、每个语言包带 `meta`、仓库无 `._*`、`files` 不用 locale 通配、`exports` 导出语言包、图标是包内普通文件。
+  - **README / AGENTS.md**：兼容表（testedWith、engines 说明）、测试数 36→42、新增「语言包与打包边界（DSH 0.2.2+ 必读）」小节与真实加载器自查命令、硬约定新增第 4 条（语言包 = 展示元信息）、目录表与验证矩阵同步。
+- **验证（原始结论）**：
+  - `npm test` → **42/42 pass**；`npm run compat` → exit 0，输出 `运行中的 DSH 0.2.2-rc.2 ← 安装清单 app-boot …`、`✔ 0.2.2-rc.2 在实测清单里`。
+  - 真实加载器（DSH 0.2.2-rc.2 的 `readPluginMeta`，经 `ELECTRON_RUN_AS_NODE` 调 app-boot）：改前 `title.en="@local/dsh-mcp-switch"`；在 `locale/` 放一个 `._en.json` 后报 `Plugin metadata for @local/dsh-mcp-switch: Error: @local/dsh-mcp-switch/locale/._en.json must use a language id as its filename`（与 Linux 机同款报错；试验文件已删除）；改后 `title={en,zh}` 且**无** `error` 字段。
+  - Host 路由（运行中 DSH 0.2.2-rc.2，web 端口 63795）：`GET /api/mcp-switch/servers` → 200（gitnexus/superting/rea 三行，tools 与 `probe.tokens` 齐全）；伪造 Host → 403；`Sec-Fetch-Site: cross-site` → 403；POST → 405。
+  - 真实开关：`plugin_manager set_plugin include:mcp-gitnexus` 开 → `application: applied`，实时工具 0→13、enabled=true；再关 → `applied`，实时工具回到 0 而探测缓存仍是 13（停用态仍可预览）。**profile 补丁已还原**（备份 `~/.dsh/profiles/desktop/cordis.patch.yml.bak-20261113-before-compat-toggle`；还原后与备份 `sort` 后 diff 为空，仅 DSH 重写了条目顺序）。MCP 状态与开始时一致（gitnexus/rea 停用、superting 启用）。
+  - 客户端契约（对安装的 0.2.2-rc.2 源码核对）：`window.__ModuleLoader__.load({id,factory})` 仍是加载约定；`settings.section` 仍是 `{kind:'list',scope:'root'}` 槽位；`plugin-manager/changed`、`connection/reset` 事件名未变；`pluginManager.listPlugins` / `setPluginEnabled` 签名未变（已实跑）。
+  - **未验证**：页面视觉（无浏览器控制）——插件管理页标题/描述与设置页「MCP 服务」页需用户刷新后目测。
+- **当前状态**：version **0.4.0**（本次与上一条一起发布为 v0.4.0）；运行中的 DSH **0.2.2-rc.2**（本机桌面外壳是 0.2.2-rc.1）。
+- **未完成 & 下一步**：
+  1. 用户刷新插件管理页确认标题变成「MCP 服务开关」（页面视觉无浏览器控制，未验证）；
+  2. 另一台 Linux 机（107.131）上的插件源码仍是旧 locale 结构，需把本仓库这批改动同步过去（重新拷目录**必须**带 `tar --exclude='._*'`，或直接 `git pull`）。
+- **坑**：
+  1. **DSH 0.2.2 的语言包加载器对目录内容零容忍**：`locale/` 下每个 `*.json` 都会被当语言字典，文件名必须匹配 `/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/`；`._en.json` 这种 AppleDouble 旁注文件会让**整包**元信息读取失败（`link:` 安装同样中招，因为加载器直接 `readdirSync` 真实目录）。
+  2. **展示元信息只认 `meta`**：平铺 `title`/`description` 被忽略 → 标题退化成包名；`package.json` 顶层的 `meta` 也不作数（只读语言包 JSON）。
+  3. **桌面外壳版本 ≠ DSH CLI 版本**：本机 `runtime.json` 的 `desktopVersion` 是 0.2.2-rc.1，CLI 是 0.2.2-rc.2；老的 compat 脚本读前者 → 假警报。
+  4. **`engines.dsh` 是顶层字段**：`dsh.engines` 不参与兼容校验；DSH 比较 peer 时带 `includePrerelease`，所以 `^0.2.0-rc.2` 能放行 `0.2.2-rc.2`。
+  5. **superting 独立探测 401**：profile 里内联的 SuperTing token 已失效（`~/.dsh/profiles/desktop/cordis.patch.yml` 的 `mcp-superting.headers.Authorization` 用 `!!js` 取 `SUPERTING_MCP_TOKEN`，否则回退到写死的旧 token），探测报 `initialize failed with HTTP 401`；页面里 superting 的「说明」因此显示未知（tools 1221、说明 0）。与本插件无关，需更新 token。
+  6. 插件管理器每次列 bundle 报 `llm-deepseek-account: models is no longer configurable`，是本机 profile 的旧配置（模型目录改由账号 `/models` 供给），与本插件无关。
+
+---
+
+## 2026-10-22 v0.4.0：工具预览增加「上下文 token 占用」估算
+
+- **背景/目标**：用户要求预览 MCP 工具时同时预测它在会话里占用的 token（2K/3K/5K/10K/50K 量级），以便决定开不开。
+- **改了什么**：
+  - **`probe.js`**：按 DSH 自己的计价公式给探测结果计价 —— `toolsTokens = ceil(JSON.stringify(tools)/4)+4`（`dsh-token-meter/estimate` 的固定启发式），`instructionsTokens = ceil(len("### MCP server: <name>\n\n"+instructions)/4)+4`；`tools` 项按 DSH 模型可见形态 `{name: publicToolName, description（完整原文）, parameters: inputSchema}` 构造（`publicToolName` 复刻 mcp-client 命名契约，含 12 位 hash 兜底）。新增：每工具 `tokens`、`tokens{tools,instructions,total}`、`capabilities`（tools/resources/prompts/... 摘要）、`instructions{preview(≤600 字符),chars,tokens}`。
+  - **`index.js`**：探测缓存（版本 2）新增 `tokens` / `instructions` / `capabilities` / `instructionsKnown`；运行中服务的实时工具回写时按实际 `ctx.tools.schemas()` 重算 token、同配置时保留说明与能力元数据；**实时回写改用 resolved config 计算指纹**（否则 `!!js` raw config 与探测器 resolved config 的指纹不同，每次 GET 都会覆盖缓存）；缓存命中要求 `instructionsKnown === true`，旧缓存自动重探测。
+  - **`client.js`**：每行显示 `上下文占用 ≈X tokens`，展开显示明细（工具 ≈A + 说明 ≈B）、每个工具的单价、能力 chips（resources/prompts/…）、服务说明预览；页面底部显示**已启用服务合计 ≈X tokens**。实时行缺说明计价时会自动补探测一次（`instructionsKnown` 标记）。
+  - 测试 +1：`tests/fixtures/mcp-stdio-server.mjs` 与 HTTP fixture 返回 instructions/capabilities；`tests/probe.test.mjs` 断言 token 公式精确值、instructions、capabilities；`tests/host.test.mjs` 断言 probe 响应/缓存/GET 的 tokens 与实时回写公式；`tests/client.test.mjs` 断言 token 徽标/明细/说明/能力，以及"上次探测缓存命中不重连"。
+  - 文档/版本：README 新增「Token 占用估算」章节（公式、口径、本机实测值）；AGENTS 版本 0.4.0、36 项测试、验证矩阵加入 token 公式；package.json 0.4.0 + locale 描述同步。
+- **验证（原始结论）**：
+  - `npm test` → **36/36 pass**；`npm run compat` → exit 0（0.2.1-rc.2）。
+  - 运行中 DSH 实测 `GET /servers`（profile 已还原）：
+    - `gitnexus`（停用）13 tools，tokens `{tools:5671, instructions:0, total:5671}`（5.7K），capabilities `tools,resources,prompts`；
+    - `superting`（启用）14 tools，tokens `{tools:1221, instructions:347, total:1568}`（1.6K），instructions 1344 字符，capabilities `tools`；
+    - `rea`（停用）187 tools，tokens `{tools:132851, instructions:213, total:133064}`（**133K**），capabilities `tools,prompts,completions`。
+  - 连续两次 GET 数值一致（实时回写与探测缓存不漂移）；缓存文件 128,576 bytes，`grep Authorization|Bearer|SUPERTING_MCP_TOKEN` → 0。
+  - 修复过程中实测踩到并验证：live 回写用 raw `!!js` 指纹导致 GET 每次覆盖缓存（instructions 归零/caps 为空），改用 resolved config 指纹后稳定。
+- **当前状态**：version **0.4.0**；运行中的 DSH 0.2.1-rc.2；**未提交/未推送/未打 tag**；上一发布 tag 仍是 `v0.3.0`。
+- **未完成 & 下一步**：① 用户刷新页面确认 token 徽标/明细/能力/说明的视觉；② 确认后按发版四步发 v0.4.0（commit → push → tag → Release）；③ `rea` 的 133K 是真实量级（187 工具），说明"先预览再决定开关"的价值；若嫌总量大，可考虑在插件里做工具级 allow-list（当前不做，超出边界）。
+- **坑**：
+  1. **live 与 probe 必须用同一份 resolved config 算指纹**：`entry.options.config` 里的 `!!js` 节点（superting token）和 `entry.fiber.config`/`entry.evaluate` 求值后的值 hash 不同，会导致"配置没变但缓存永远失效/被覆盖"。现在两条路径都走 `resolveServerConfig()`。
+  2. **instructions 只有 `initialize` 返回**：实时工具只能算出工具 schema 的 token，不能凭空知道说明；用 `instructionsKnown` 标记，未知时页面自动补一次探测（已有探测缓存则直接用）。
+  3. **缓存版本必须跟着数据结构升级**：v1（无 tokens）→ v2；缓存命中条件包含 `instructionsKnown === true`，否则会用缺说明的旧价。
+  4. 计价口径：DSH 的 `toolsTokens` 是**全部可见工具**的合计；本页是"单服务工具子集 + 该服务说明"，相加≈全部启用服务合计，实际模型 tokenizer 与 4 字符/token 有偏差。
+- **相关备份**：`~/.dsh/profiles/desktop/cordis.patch.yml.bak-20261021-210623`（仍为基线）；本日实验用 `/tmp/cordis-token-check.yml` 等临时副本，最终已 `diff` 还原。
+
+---
+
 ## 2026-10-21 v0.3.0：未开启也能预览（独立探测 + 磁盘缓存），取代 v0.2.0 的"启用后才读"
 
 - **背景/目标**：用户指出上一版方向不对：开关只决定 Agent 侧挂不挂载 MCP 客户端，MCP 服务本身一直存在，**应该在开关之前就能看工具**；并且"读过一次就缓存，配置没变就引用"。v0.2.0 的"启用后才读"被否决（v0.2.0 从未提交/发布，直接由本版取代）。

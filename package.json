@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-mcp-switch",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Harness 设置的「MCP 服务」页：不用先开启就能预览每个 MCP 服务器提供的工具，并逐个启用/停用，运行时热生效。",
+  "description": "Harness 设置的「MCP 服务」页：预览每个 MCP 服务器的工具与上下文 token 占用，并逐个启用/停用，运行时热生效。",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -19,7 +19,7 @@
   },
   "meta": {
     "title": "MCP 服务开关",
-    "description": "在设置里预览每个 MCP 服务器的工具清单（无需先开启），并逐个开关（rea / gitnexus / superting 等），无需重启。"
+    "description": "预览每个 MCP 服务器的工具、能力与上下文 token 占用（不用先开启），并逐个开关，无需重启。"
   },
   "icon": "./icon.svg",
   "files": [
@@ -28,11 +28,12 @@
     "client.js",
     "cordis.patch.yml",
     "icon.svg",
-    "locale/*.json",
+    "locale/en.json",
+    "locale/zh.json",
     "scripts/*.mjs"
   ],
   "scripts": {
-    "test": "node --test tests/client.test.mjs tests/host.test.mjs tests/probe.test.mjs tests/compat.test.mjs",
+    "test": "node --test tests/client.test.mjs tests/host.test.mjs tests/probe.test.mjs tests/compat.test.mjs tests/locale.test.mjs",
     "compat": "node scripts/check-compat.mjs"
   },
   "peerDependencies": {
@@ -49,7 +50,8 @@
     },
     "testedWith": [
       "0.2.0-rc.2",
-      "0.2.1-rc.2"
+      "0.2.1-rc.2",
+      "0.2.2-rc.2"
     ],
     "bundle": {
       "patch": "./cordis.patch.yml"

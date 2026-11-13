@@ -25,8 +25,18 @@ import { createHash } from 'node:crypto'
 
 /** Protocol revision offered first; a server may negotiate another one. */
 const PROTOCOL_VERSIONS = ['2025-06-18', '2024-11-05']
+/** Fixed-density estimate shared with DSH's token meter (4 characters/token). */
+const CHARS_PER_TOKEN = 4
+/** DSH token-meter structural overhead for one JSON block. */
+const BLOCK_OVERHEAD = 4
+/** DSH's model-facing tool-name budget and charset (mcp-client naming contract). */
+const MAX_PUBLIC_NAME_LENGTH = 64
+const INVALID_NAME_CHARS = /[^A-Za-z0-9_-]/g
+const HASH_LENGTH = 12
+/** Bound of the instructions preview kept in the payload/cache. */
+const MAX_INSTRUCTION_PREVIEW_CHARS = 600
 /** Client identity sent in `initialize`. */
-const CLIENT_INFO = { name: 'dsh-mcp-switch-probe', version: '0.3.0' }
+const CLIENT_INFO = { name: 'dsh-mcp-switch-probe', version: '0.4.0' }
 /** Default ceiling for one probe (connect + handshake + tools/list). */
 export const DEFAULT_PROBE_TIMEOUT_MS = 20000
 /** Upper bound for one server's tool list in the preview payload. */
@@ -62,7 +72,7 @@ export async function probeServer(config, options = {}) {
           : (() => {
               throw new Error(`probe: unsupported transport ${JSON.stringify(config.transport)}`)
             })()
-      return { ...result, tools: result.tools.slice(0, MAX_TOOLS) }
+      return finalizeProbe(result, typeof config.serverName === 'string' ? config.serverName : '')
     } catch (error) {
       lastError = error
       // A server that rejects the offered revision may accept the older one;
@@ -96,21 +106,123 @@ export function configFingerprint(config) {
 }
 
 /**
- * Project one raw MCP tool into the preview payload.
+ * Project one raw MCP tool into the internal shape that token pricing needs.
+ * The full description and input schema are kept until `finalizeProbe` prices
+ * the model-facing schema, then only the display fields are retained.
  * @param {unknown} tool - an entry of `tools/list`.
- * @returns {object|undefined} the public tool row.
+ * @param {string} serverName - the configured namespace for the public name.
+ * @returns {object|undefined} the internal tool row.
  */
-function projectTool(tool) {
+function projectTool(tool, serverName) {
   if (!isRecord(tool) || typeof tool.name !== 'string' || tool.name === '') return void 0
-  const schema = isRecord(tool.inputSchema) ? tool.inputSchema : {}
+  const schema = isRecord(tool.inputSchema) ? tool.inputSchema : { type: 'object', properties: {} }
   const properties = isRecord(schema.properties) ? schema.properties : {}
   const required = new Set(Array.isArray(schema.required) ? schema.required : [])
   return {
-    name: tool.name,
-    description: truncate(typeof tool.description === 'string' ? tool.description : ''),
+    rawName: tool.name,
+    publicName: publicToolName(serverName, tool.name),
+    description: typeof tool.description === 'string' ? tool.description.trim() : '',
+    inputSchema: schema,
     parameters: Object.keys(properties)
       .slice(0, MAX_PARAMETERS)
       .map((name) => ({ name, required: required.has(name) })),
+  }
+}
+
+/**
+ * Derive the model-facing name exactly as `@deepseek-ai/dsh-mcp-client` does:
+ * `mcp__<server>__<raw>`, normalized to the DeepSeek function-name contract
+ * with a short identity hash when normalization loses information.
+ * @param {string} serverName - configured MCP server namespace.
+ * @param {string} rawName - the server's own tool name.
+ * @returns {string} the public tool name the session tool list would carry.
+ */
+function publicToolName(serverName, rawName) {
+  const joined = 'mcp__' + serverName + '__' + rawName
+  const normalized = joined.replace(INVALID_NAME_CHARS, '_')
+  if (normalized === joined && normalized.length <= MAX_PUBLIC_NAME_LENGTH) return normalized
+  const hash = createHash('sha256')
+    .update(serverName + '\u0000' + rawName)
+    .digest('hex')
+    .slice(0, HASH_LENGTH)
+  return normalized.slice(0, MAX_PUBLIC_NAME_LENGTH - HASH_LENGTH - 1) + '_' + hash
+}
+
+/**
+ * Price one model-facing tools array with DSH's own heuristic:
+ * `ceil(JSON.stringify(tools).length / 4) + 4` (see `dsh-token-meter/estimate`).
+ * @param {Array<object>} wireTools - exact `{name, description, parameters}` objects.
+ * @returns {number} heuristic tokens.
+ */
+export function estimateToolsTokens(wireTools) {
+  if (wireTools.length === 0) return 0
+  return Math.ceil(JSON.stringify(wireTools).length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD
+}
+
+/**
+ * Price the server instructions the MCP client would inject as a system-prompt
+ * section (`### MCP server: <name>\n\n<instructions>`).
+ * @param {string} serverName - configured MCP server namespace.
+ * @param {string} instructions - the server's instructions text.
+ * @returns {number} heuristic tokens; 0 for empty instructions.
+ */
+function estimateInstructionsTokens(serverName, instructions) {
+  const text = instructions.trimEnd()
+  if (text === '') return 0
+  const section = '### MCP server: ' + serverName + '\n\n' + text
+  return Math.ceil(section.length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD
+}
+
+/** Keep only the capability groups a preview can meaningfully report. */
+function summarizeCapabilities(capabilities) {
+  if (!isRecord(capabilities)) return {}
+  const summary = {}
+  for (const key of ['tools', 'resources', 'prompts', 'logging', 'completions', 'tasks', 'experimental']) {
+    const value = capabilities[key]
+    if (value === void 0 || value === null || value === false) continue
+    summary[key] = true
+  }
+  return summary
+}
+
+/**
+ * Price a probe result and reduce it to the public preview payload.
+ * @param {object} result - transport result before pricing.
+ * @param {string} serverName - configured MCP server namespace.
+ * @returns {object} public probe payload with `tokens` and instructions preview.
+ */
+function finalizeProbe(result, serverName) {
+  const tools = result.tools.slice(0, MAX_TOOLS)
+  const wireTools = tools.map((tool) => ({
+    name: tool.publicName,
+    description: tool.description,
+    parameters: tool.inputSchema,
+  }))
+  const toolTokens = wireTools.map((wire) => Math.ceil(JSON.stringify(wire).length / CHARS_PER_TOKEN))
+  const toolsTokens = estimateToolsTokens(wireTools)
+  const instructions = typeof result.instructions === 'string' ? result.instructions : ''
+  const instructionsTokens = estimateInstructionsTokens(serverName, instructions)
+  return {
+    protocolVersion: result.protocolVersion,
+    serverInfo: result.serverInfo,
+    capabilities: summarizeCapabilities(result.capabilities),
+    instructions: {
+      preview: truncate(instructions).slice(0, MAX_INSTRUCTION_PREVIEW_CHARS),
+      chars: instructions.trimEnd().length,
+      tokens: instructionsTokens,
+    },
+    tools: tools.map((tool, index) => ({
+      name: tool.rawName,
+      publicName: tool.publicName,
+      description: truncate(tool.description),
+      parameters: tool.parameters,
+      tokens: toolTokens[index],
+    })),
+    tokens: {
+      tools: toolsTokens,
+      instructions: instructionsTokens,
+      total: toolsTokens + instructionsTokens,
+    },
   }
 }
 
@@ -204,10 +316,12 @@ async function probeStdio(config, protocolVersion, timeoutMs) {
       clientInfo: CLIENT_INFO,
     })
     notify('notifications/initialized')
-    const tools = await listAllTools(request)
+    const tools = await listAllTools(request, config.serverName ?? '')
     return {
       protocolVersion: typeof init?.protocolVersion === 'string' ? init.protocolVersion : protocolVersion,
       serverInfo: isRecord(init?.serverInfo) ? init.serverInfo : {},
+      capabilities: init?.capabilities,
+      instructions: typeof init?.instructions === 'string' ? init.instructions : '',
       tools,
     }
   } catch (error) {
@@ -271,7 +385,7 @@ async function probeHttp(config, protocolVersion, timeoutMs) {
     for (let page = 0; page < MAX_TOOL_PAGES; page++) {
       const result = await request(nextId++, 'tools/list', cursor === void 0 ? {} : { cursor })
       for (const tool of Array.isArray(result?.tools) ? result.tools : []) {
-        const projected = projectTool(tool)
+        const projected = projectTool(tool, config.serverName ?? '')
         if (projected !== void 0) tools.push(projected)
       }
       cursor = result?.nextCursor
@@ -280,6 +394,8 @@ async function probeHttp(config, protocolVersion, timeoutMs) {
     return {
       protocolVersion: typeof init?.protocolVersion === 'string' ? init.protocolVersion : protocolVersion,
       serverInfo: isRecord(init?.serverInfo) ? init.serverInfo : {},
+      capabilities: init?.capabilities,
+      instructions: typeof init?.instructions === 'string' ? init.instructions : '',
       tools,
     }
   } finally {
@@ -295,14 +411,14 @@ async function probeHttp(config, protocolVersion, timeoutMs) {
   }
 }
 
-/** All pages of `tools/list`, projected into preview rows. */
-async function listAllTools(request) {
+/** All pages of `tools/list`, projected into internal tool rows. */
+async function listAllTools(request, serverName) {
   const tools = []
   let cursor
   for (let page = 0; page < MAX_TOOL_PAGES; page++) {
     const result = await request('tools/list', cursor === undefined ? {} : { cursor })
     for (const tool of Array.isArray(result?.tools) ? result.tools : []) {
-      const projected = projectTool(tool)
+      const projected = projectTool(tool, serverName ?? '')
       if (projected !== void 0) tools.push(projected)
     }
     cursor = result?.nextCursor

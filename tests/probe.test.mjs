@@ -71,8 +71,9 @@ async function startHttpServer({ sse = false, token = 'Bearer test-token', tools
         id: message.id,
         result: {
           protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
-          capabilities: { tools: {} },
+          capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'fixture-http', version: '9.9.9' },
+          instructions: 'HTTP fixture guidance.',
         },
       })
       return
@@ -134,6 +135,28 @@ test('stdio probe spawns the server, paginates tools/list and shuts it down', as
     { name: 'limit', required: false },
   ])
   assert.equal(result.tools[1].description, 'Second fixture tool')
+  // Token estimate follows DSH's own tools heuristic, and instructions are priced.
+  assert.equal(result.tokens.tools, Math.ceil(JSON.stringify([
+    {
+      name: result.tools[0].publicName,
+      description: 'First fixture tool',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' }, limit: { type: 'number' } },
+        required: ['query'],
+      },
+    },
+    {
+      name: result.tools[1].publicName,
+      description: 'Second fixture tool',
+      parameters: { type: 'object', properties: {} },
+    },
+  ]).length / 4) + 4)
+  assert.ok(result.tokens.instructions > 0)
+  assert.equal(result.tokens.total, result.tokens.tools + result.tokens.instructions)
+  assert.ok(result.tools[0].tokens > 0)
+  assert.deepEqual(result.capabilities, { tools: true, resources: true })
+  assert.match(result.instructions.preview, /Fixture instructions/)
 })
 
 test('stdio probe reports the server stderr when the command cannot serve', async () => {
@@ -160,6 +183,9 @@ test('streamable-http probe sends the configured auth header and reads tools', a
     assert.deepEqual(result.tools.map((tool) => tool.name), ['http_tool_1', 'http_tool_2'])
     assert.deepEqual(result.tools[0].parameters, [{ name: 'text', required: true }])
     assert.equal(server.sawSession(), true, 'tools/list must carry the session id from initialize')
+    assert.ok(result.tokens.tools > 0)
+    assert.ok(result.tokens.instructions > 0)
+    assert.deepEqual(result.capabilities, { tools: true, prompts: true })
   } finally {
     await server.close()
   }

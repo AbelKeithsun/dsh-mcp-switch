@@ -10,19 +10,19 @@
 
 | 项 | 值 |
 |---|---|
-| 这是什么 | DSH Web UI 的「设置 → MCP 服务」页插件：不用先开启就能预览每个 MCP 服务器的工具，并逐个启用/停用，热生效 |
+| 这是什么 | DSH Web UI 的「设置 → MCP 服务」页插件：不用先开启就能预览每个 MCP 服务器的工具、能力与上下文 token 占用，并逐个启用/停用，热生效 |
 | 代码位置 | `~/Documents/workspace/open-source/dsh-mcp-switch`（就是本目录，独立 git 仓库） |
 | 远端 | <https://github.com/AbelKeithsun/dsh-mcp-switch>（public · MIT） |
 | 安装形态 | DSH profile 的 `link:` 依赖（由 `plugin_manager install_bundle` 写入）；改文件即时生效，**换 JS 模块代需重启 dsh** |
 | 技术形态 | 纯 JS、零依赖、零构建；宿主半边有两条只读路由（现状 + 独立探测），其余逻辑在浏览器半边 |
-| 当前版本 | 见 [`package.json`](package.json)（v0.3.0）；实际状态以 HANDOFF 为准 |
+| 当前版本 | 见 [`package.json`](package.json)（v0.4.0）；实际状态以 HANDOFF 为准 |
 
 ## 1. 会话启动自检（先跑，别猜）
 
 ```bash
 pwd                     # 必须是本目录
 node -v                 # 作者环境 24.x（>=22 可用）
-npm test                # 期望 35 项全绿
+npm test                # 期望 43 项全绿
 npm run compat          # 期望 exit 0（比对运行中的 DSH 版本 vs dsh.testedWith）
 git log --oneline -3; git status --short
 ```
@@ -31,7 +31,7 @@ git log --oneline -3; git status --short
 
 1. `plugin_manager` → `action: list_plugins` → 找 `include:mcp-switch`，应为 `enabled: true, fiberPhase: active`；
 2. `cordis_inspect_query`（client · `Slots.listSubTree` · `root=settings.section`）→ occupants 里应有 `mcp-switch`（order 16）；
-3. 只有只读能力、无需批准：`curl http://127.0.0.1:<web 端口>/api/mcp-switch/servers` → 200 且 `servers[].tools` 是数组；
+3. 只有只读能力、无需批准：`curl http://127.0.0.1:<web 端口>/api/mcp-switch/servers` → 200，`servers[].tools` 是数组，`servers[].probe.tokens.total` 是数字；
 4. 探测能力：`curl -X POST -H 'content-type: application/json' -d '{"entryId":"include:<patchId>"}' http://127.0.0.1:<web 端口>/api/mcp-switch/probe` → 200 且 `probe.tools` 是数组（未开启的服务也可）。
 
 任一项对不上：先看 HANDOFF 的「坑」，再动手，不要靠推测。
@@ -41,26 +41,28 @@ git log --oneline -3; git status --short
 1. **开关只走已有机制**：调用 `pluginManager` Remote（`listPlugins` / `setPluginEnabled`）。不要在 client 里自己改写 profile 文件，也不要为此新增宿主服务——那会重造已存在的实现。**预览/探测是唯一例外**：Host 半边可以读 `loader` / `tools`，可以按该行自己的配置临时连接 MCP 服务只读 `tools/list`（stdio 会短暂 spawn 该命令，HTTP 只发 initialize + tools/list），并通过两条只读本机路由交给页面；但不得绕过 `pluginManager` 做开关、不得调用任何 MCP 工具、不得把 profile 的 env/headers/args/URL 发到浏览器或写进缓存。
 2. **不引入 Harness 客户端包**：`client.js` 用 `window.__ModuleLoader__.load` + 模块表 `require('react')`；不 import `@deepseek-ai/dsh-client-*`（版本一变就炸，且没有类型检查兜底）。
 3. **样式只用主题 token**（`--dsw-alias-*`），不写死颜色；可见文案一律走 `locale` 服务，`zh` / `en` 都要补。
-4. **改完必须真跑**：单测 + 真实开关一次（关一个再开回来，确认 `application: applied`），**结束后还原**被改动的 MCP 状态。
-5. **兼容声明是契约**：DSH 只读 `peerDependencies` 里 `@deepseek-ai/dsh*` 的范围；`dsh.testedWith` 只写真跑过的版本。升级 DSH 后按 `npm run compat` 打印的 6 项清单复验（含预览/探测路由）。
-6. **全局/破坏性配置改动**（profile 补丁、机器级层、MCP 服务器增删）必须先 `cp` 备份，并在 HANDOFF 里写明回滚命令。
+4. **语言包 = 插件展示元信息**：`locale/{en,zh}.json` 必须同时写 `meta.title` / `meta.description`（DSH 0.2.2+ 只认 `meta`，平铺键会被忽略 → 标题回退成包名），且 `locale/` 目录里**只允许** `en.json` / `zh.json`——多一个 `._en.json` 这类旁注文件就会让整个包「元信息错误」（DSH 会把目录下每个 `*.json` 当语言字典，文件名必须是合法语言 id）。`package.json` 的 `files` 用显式文件名，不用 `locale/*.json` 通配。
+5. **改完必须真跑**：单测 + 真实开关一次（关一个再开回来，确认 `application: applied`），**结束后还原**被改动的 MCP 状态。
+6. **兼容声明是契约**：DSH 的兼容校验只读 `peerDependencies` 里 `@deepseek-ai/dsh*` 的范围（顶层 `engines.dsh` 若存在则一票决定；本插件没有顶层 `engines`，所以生效的是 peer）；`dsh.testedWith` 只写真跑过的版本。升级 DSH 后按 `npm run compat` 打印的 6 项清单复验（含预览/探测路由）。
+7. **全局/破坏性配置改动**（profile 补丁、机器级层、MCP 服务器增删）必须先 `cp` 备份，并在 HANDOFF 里写明回滚命令。
 
 ## 3. 目录与职责
 
 | 文件 | 职责 | 改动风险 |
 |---|---|---|
 | `client.js` | 浏览器半边：`settings.section` 注册「MCP 服务」页、store、开关控件、工具预览 UI、CSS、zh/en 字典 | 高（唯一有 UI 逻辑的文件） |
-| `index.js` | 宿主半边：`GET /api/mcp-switch/servers`（现状+缓存）、`POST /api/mcp-switch/probe`（独立探测）、磁盘缓存、回环围栏 | 中（新的 Host 面，必须保持只读、无 secret、loopback-only） |
-| `probe.js` | 零依赖 MCP 探测客户端：stdio 换行 JSON-RPC / streamable-http（JSON+SSE）/ tools/list 分页 / 超时清理 | 中（协议细节，改动必须跑 `tests/probe.test.mjs`） |
+| `index.js` | 宿主半边：`GET /api/mcp-switch/servers`（现状+缓存）、`POST /api/mcp-switch/probe`（独立探测）、token/instructions 缓存、回环围栏 | 中（新的 Host 面，必须保持只读、无 secret、loopback-only） |
+| `probe.js` | 零依赖 MCP 探测客户端：stdio 换行 JSON-RPC / streamable-http（JSON+SSE）/ tools/list 分页 / 超时清理 / token 计价（与 `dsh-token-meter` 同公式：`ceil(JSON.stringify(tools)/4)+4`）与 instructions 计价 | 中（协议与计价细节，改动必须跑 `tests/probe.test.mjs`） |
 | `cordis.patch.yml` | 插入宿主行 `mcp-switch`（id 即 profile 里的 `include:mcp-switch`） | 中 |
 | `package.json` | bundle 清单 + `dsh.client` + **DSH 兼容声明** | 中（兼容字段一错就被 DSH 拦） |
-| `scripts/check-compat.mjs` | `npm run compat`：探测运行版本、版本不在实测清单则退出 1 并打印复验清单 | 低 |
-| `tests/client.test.mjs` | 客户端行为 11 项（假 `window.__ModuleLoader__` / React / ctx / fetch / localStorage 跑真实 `apply()`） | — |
-| `tests/host.test.mjs` | 宿主路由 13 项（假 `loader` / `tools` / `webServer` 跑真实 `apply()` 并直接调 handler） | — |
-| `tests/probe.test.mjs` | 探测客户端 6 项（真实 stdio 子进程 + 本地 HTTP JSON/SSE fixture） | — |
+| `scripts/check-compat.mjs` | `npm run compat`：探测**运行中的 DSH CLI 版本**（app-boot 安装清单，不是桌面外壳版本）、版本不在实测清单则退出 1 并打印复验清单 | 低 |
+| `tests/client.test.mjs` | 客户端行为 12 项（假 `window.__ModuleLoader__` / React / ctx / fetch / localStorage 跑真实 `apply()`） | — |
+| `tests/host.test.mjs` | 宿主路由 14 项（假 `loader` / `tools` / `webServer` 跑真实 `apply()` 并直接调 handler） | — |
+| `tests/probe.test.mjs` | 探测客户端 6 项（真实 stdio 子进程 + 本地 HTTP JSON/SSE fixture；含 token 公式） | — |
 | `tests/fixtures/mcp-stdio-server.mjs` | 测试用最小 stdio MCP server（分页 tools/list） | — |
 | `tests/compat.test.mjs` | 兼容声明 5 项（机器无关） | — |
-| `locale/{zh,en}.json` | 插件管理页展示文案 | 低 |
+| `tests/locale.test.mjs` | 语言包与打包边界 6 项（`meta` 结构、`locale/` 目录纯净、无 `._*`、`files` 无通配、图标存在） | — |
+| `locale/{zh,en}.json` | 插件管理页展示文案：**必须含 `meta.title` / `meta.description`** | 低（缺 `meta` → 标题回退成包名） |
 | `docs/HANDOFF.md` | **会话交接日志**（倒序追加） | — |
 
 ## 4. 常见任务的入口
@@ -77,9 +79,10 @@ git log --oneline -3; git status --short
 | 改了什么 | 至少要做 |
 |---|---|
 | `client.js` | `npm test` + 页面里真实开关一次（关→开→确认 applied），确认预览随开关更新 |
-| `index.js`（Host 路由） | `npm test` + `curl /api/mcp-switch/servers` 200（含实时/探测工具）、`curl -X POST /api/mcp-switch/probe` 200（未开启的服务也要能读）、403（伪造 Host）、405（错误方法） |
-| `probe.js`（MCP 探测） | `npm test` + 对三个本机 MCP 各探测一次（stdio 与 HTTP 各至少一个），确认 `probe.tools` 与服务器实际工具一致；改协议细节后必须重跑 `tests/probe.test.mjs` |
+| `index.js`（Host 路由） | `npm test` + `curl /api/mcp-switch/servers` 200（含实时/探测工具与 `probe.tokens`）、`curl -X POST /api/mcp-switch/probe` 200（未开启的服务也要能读）、403（伪造 Host）、405（错误方法） |
+| `probe.js`（MCP 探测 + 计价） | `npm test` + 对三个本机 MCP 各探测一次（stdio 与 HTTP 各至少一个），确认 `probe.tools` 与服务器实际工具一致、`probe.tokens` 与 `ceil(JSON.stringify(按 DSH 形态构造的 tools)/4)+4` 一致；改协议或计价后必须重跑 `tests/probe.test.mjs` |
 | `package.json` 兼容声明 | `npm run compat` + 把插件自身 `set_plugin` off/on 一次（证明声明不会误伤自己） |
+| `locale/*.json`（展示文案） | `npm test`（`tests/locale.test.mjs` 守住 `meta` 结构与目录纯净）+ 插件管理页确认标题/描述不再是包名 |
 | `cordis.patch.yml` | 重装/重载后确认 `include:mcp-switch` 仍 active |
 | 文档 | `npm test`（防顺手改坏），无需真机验证 |
 

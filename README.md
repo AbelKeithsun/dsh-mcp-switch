@@ -17,6 +17,9 @@
   结果按配置指纹缓存在磁盘上；之后直接引用缓存，配置没变就不会重复连接。
 - 开启中的服务显示**实时**工具清单；关闭的服务显示缓存清单并标注读取时间。
   也可以手动「重新读取」，或对某个服务单独读取（读取失败会显示原因并可重试）。
+- **上下文 token 估算**：每个服务旁显示 `上下文占用 ≈ 5.7K tokens`（工具 schema + 服务说明），
+  展开后有明细（工具 ≈X + 说明 ≈Y）和按工具的单价；页面底部显示**已启用服务合计**。
+  估算公式与 DSH 的 `dsh-token-meter` 同一套启发式，见下节。
 
 ## 工具预览是怎么来的（Host 半边）
 
@@ -39,6 +42,11 @@ POST /api/mcp-switch/probe     # { entryId, force? }：连接该服务读 tools/
   零依赖，只用 Node 内置模块。
 - 行被关闭时没有运行中的 Fiber，配置里的 `!!js` 表达式（例如 superting 的 Bearer token）由
   Loader 的 `evaluate` 现算，不需要该行处于启用状态。
+- **配置一律取 `entry.options.config` 再自己求值**：DSH 0.2.2 的 `entry.fiber.config` 是**原始**输入，
+  里面的 `!!js` 节点还是 `{__jsExpr}` 对象；只有 `fiber.effectiveConfig` 才是插值后的副本。
+  早期版本误用 `fiber.config`，导致**启用行**的 `Authorization` 头被字符串化成 `[object Object]`，
+  服务器一律 401（停用行反而正常，因为那条路径会求值）。详见
+  [`docs/HANDOFF.md`](docs/HANDOFF.md) 2026-11-13 记录。
 
 ### 缓存与失效
 
@@ -58,6 +66,33 @@ POST /api/mcp-switch/probe     # { entryId, force? }：连接该服务读 tools/
 - 探测只是读：不调用任何 MCP 工具、不改 profile、不把配置发给浏览器。它执行的命令与"打开该服务"
   时 Loader 执行的命令相同，同样只信任本机操作者。
 - 通过局域网 IP 打开 DSH 时预览显示"暂不可用"，开关本身不受影响。
+
+### Token 占用估算
+
+DSH 用固定启发式给请求里的工具 schema 计价（`@deepseek-ai/dsh-token-meter/estimate`）：
+
+```text
+toolsTokens = ceil(JSON.stringify(tools).length / 4) + 4
+```
+
+`tools` 就是模型看到的工具数组，每项为 `{name, description, parameters}`（MCP 工具的名字是
+`mcp__<server>__<raw>`，description 与 inputSchema 原样进入）。本插件按同一公式给**单个服务**
+的工具子集计价，再加上该服务 instructions 注入系统提示的文本成本：
+
+```text
+instructionsTokens = ceil(len("### MCP server: <name>\n\n" + instructions) / 4) + 4   # 无 instructions 时为 0
+total = toolsTokens + instructionsTokens
+```
+
+- 计价数据来自实时 `ctx.tools.schemas()` 或探测拿到的完整 `tools/list`（描述按完整原文计价，
+  页面只截断展示）；`instructions` 同时给出字符数与预览。
+- 显示按数量级压缩：`950`、`1.6K`、`5.7K`、`133K`；10 万以上按 `K` 取整。
+- **口径**：这是一个服务**自身**的工具 schema + 说明成本；会话请求还包含其他工具、系统提示和消息。
+  DSH 的 `toolsTokens` 是全部可见工具的合计，因此本页数字之间相加 ≈ 全部启用服务的合计。
+  实际计费以模型 tokenizer 为准（DeepSeek 的字符/token 密度与 4 有差异）。
+- 本机实测（2026-10-22）：`gitnexus` 13 个工具 ≈ **5.7K**；`superting` 14 个工具 ≈1.2K +
+  说明 ≈0.35K = **1.6K**；`rea` 187 个工具 ≈132.9K + 说明 ≈0.2K = **133K**（开启 rea 会让
+  每次请求多出约 13 万 token 的工具 schema，这正是需要先预览再决定开关的理由）。
 
 ### 限制
 
@@ -87,7 +122,7 @@ git clone https://github.com/AbelKeithsun/dsh-mcp-switch.git
 与 GitHub 的 `origin/main` 常规同步（不再借助 `git subtree`）：
 
 ```bash
-npm test                       # 35 项
+npm test                       # 43 项
 npm run compat                 # 本机 DSH 版本是否在实测清单里
 git add -A && git commit -m "..." && git push origin main
 ```
@@ -109,17 +144,19 @@ DSH profile 通过 `link:` 依赖指向本目录（`install_bundle` 写入），
 
 ### 声明写在哪、谁在读
 
-DSH 的兼容校验（`@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`）
-**只读 `package.json` 里 `peerDependencies` 中 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 的 semver 范围**；
-`engines` 与 `dsh.engines` 都不参与校验（仅生态/市场展示）。不声明 peer = 校验被完全跳过，
+DSH 的兼容校验（`@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`，源码实证）
+规则是：**manifest 顶层 `engines.dsh` 一票决定**（存在时 `peerDependencies` 被忽略）；没有顶层
+`engines` 时，才逐条校验 `peerDependencies` 中 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 的
+semver 范围（比较时带 `includePrerelease`，所以 `^0.2.0-rc.2` 放行 `0.2.2-rc.2`）。
+`dsh.engines` 是嵌套字段，**不参与**校验，只用于生态/市场展示。不声明 peer = 校验被完全跳过，
 未来任何 DSH 版本都会静默加载。本插件声明：
 
 | 字段 | 值 | 作用 |
 |---|---|---|
-| `peerDependencies["@deepseek-ai/dsh"]` | `^0.2.0-rc.2` | **DSH 读它做校验**：0.2.x 放行，0.3.0 起判定不兼容 |
+| `peerDependencies["@deepseek-ai/dsh"]` | `^0.2.0-rc.2` | **DSH 读它做校验**（本插件没有顶层 `engines`）：0.2.x 放行，0.3.0 起判定不兼容 |
 | `peerDependenciesMeta["@deepseek-ai/dsh"].optional` | `true` | 只影响包管理器实参（profile 已 `autoInstallPeers: false`），不影响 DSH 校验 |
-| `dsh.engines.dsh` | `^0.2.0-rc.2` | 与 peer 同步的展示用镜像 |
-| `dsh.testedWith` | `["0.2.0-rc.2", "0.2.1-rc.2"]` | **真正实测过的版本清单**，`npm run compat` 用它判定 |
+| `dsh.engines.dsh` | `^0.2.0-rc.2` | 与 peer 同步的**展示用镜像**（DSH 不校验它） |
+| `dsh.testedWith` | `["0.2.0-rc.2", "0.2.1-rc.2", "0.2.2-rc.2"]` | **真正实测过的版本清单**，`npm run compat` 用它判定 |
 
 判定不兼容时的行为（源码实证）：该 bundle 的行被 **skip / disabled 并打印原因**，
 不会拖垮整个 profile 启动。修复二选一：更新本插件的声明，或用
@@ -151,29 +188,68 @@ npm run compat -- 0.3.0-rc.1  # 升级前预演
 全过之后：把新版本加进 `dsh.testedWith` → 按需放宽/收紧 `peerDependencies`
 → 升 `version` → 提交并发新 Release（tag 指向最新提交）。
 
+> `npm run compat` 探测的是**运行中的 DSH CLI 版本**（读 app-boot 的安装清单；装在 `app.asar`
+> 里时用 `$DSH_NODE_EXECUTABLE` + `ELECTRON_RUN_AS_NODE` 读），不是桌面外壳版本
+> （`~/.dsh/dsh-runtimes/*/runtime.json` 的 `desktopVersion`，两者可能不同——本机就是
+> 外壳 0.2.2-rc.1、CLI 0.2.2-rc.2）。
+
+## 语言包与打包边界（DSH 0.2.2+ 必读）
+
+插件管理页与「设置 → 插件」里显示的**标题 / 描述**，来自 `locale/*.json` 里的
+`meta.title` / `meta.description`（DSH `@deepseek-ai/dsh-app-boot` → `readPluginMeta`）。
+两个坑：
+
+1. **只认 `meta`**：写平铺的 `title` / `description` 会被忽略，标题回退成包名
+   （`@local/dsh-mcp-switch`）。本插件两种都写：`meta.*` 给 0.2.2+，平铺键留给更早的加载器。
+2. **`locale/` 里只允许语言包文件**：DSH 把目录下**每一个** `*.json` 都当语言字典，文件名
+   必须是合法语言 id（`/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/`）。多一个 `._en.json`
+   （macOS 把目录拷到非 HFS 文件系统时留下的 AppleDouble 旁注文件）就会让**整个包**显示
+   「包元信息错误」，插件管理页标题退化成包名。
+
+因此：
+
+- `package.json` 的 `files` 用**显式**文件名（`locale/en.json`、`locale/zh.json`），不用
+  `locale/*.json` 通配——通配正是垃圾文件进包的通道（`link:` 安装时 `files` 不过滤，
+  但打包/依赖安装时会）；
+- `.gitignore` 已忽略 `._*`；从 macOS 拷目录到 Linux 用 `tar --exclude='._*'`，
+  拷完 `find <dir> -name '._*' -delete`；
+- `tests/locale.test.mjs` 守住这三条（`meta` 结构 / 目录纯净 / 无通配）。
+
+自查（用**真实加载器**读一遍本包，应有 `title` 且**没有** `error`）：
+
+```bash
+ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" -e "
+  import(process.env.DSH_INSTALL_DIR + '/../dsh-app-boot/lib/index.js').then(m => {
+    console.log(JSON.stringify(m.readPluginMeta('@local/dsh-mcp-switch',
+      'file://' + process.cwd() + '/package.json'), null, 2))
+  })
+"
+```
+
 ## 目录
 
 | 文件 | 作用 |
 |---|---|
 | `package.json` | bundle 清单：`dsh.bundle.patch` + `dsh.client`（web，纯 JS 无构建） |
 | `cordis.patch.yml` | 插入宿主行 `mcp-switch` |
-| `index.js` | 宿主半边：`GET /servers` 现状 + `POST /probe` 独立探测、磁盘缓存、回环围栏（开关本身仍走已有 `pluginManager` Remote） |
-| `probe.js` | 零依赖 MCP 探测客户端：stdio 换行 JSON-RPC、streamable-http（JSON/SSE）、tools/list 分页、超时清理 |
+| `index.js` | 宿主半边：`GET /servers` 现状 + `POST /probe` 独立探测、token/instructions 缓存、回环围栏（开关本身仍走已有 `pluginManager` Remote） |
+| `probe.js` | 零依赖 MCP 探测客户端：stdio 换行 JSON-RPC、streamable-http（JSON/SSE）、tools/list 分页、超时清理、token 计价（与 dsh-token-meter 同公式） |
 | `client.js` | 浏览器半边：`settings.section` 里注册 `MCP 服务` 页（order 16），含工具预览/自动探测/重试 UI |
-| `tests/client.test.mjs` | 行为测试：行过滤、命名回退、开关结果、错误路径、清理注册、预览读取/缓存、自动探测与失败重试（11 项） |
-| `tests/host.test.mjs` | 宿主路由测试：工具映射、密钥不泄漏、缓存不收缩、回环围栏、探测与缓存复用/失效、`!!js` 配置求值（13 项） |
-| `tests/probe.test.mjs` | 探测客户端测试：指纹、stdio 子进程（真实 spawn）、HTTP JSON/SSE、鉴权失败、stderr 诊断（6 项） |
+| `tests/client.test.mjs` | 行为测试：行过滤、命名回退、开关结果、错误路径、清理注册、预览读取/缓存、自动探测与失败重试、token 展示（12 项） |
+| `tests/host.test.mjs` | 宿主路由测试：工具映射、密钥不泄漏、缓存不收缩、回环围栏、探测与缓存复用/失效、`!!js` 配置求值（启用行 + 停用行）（14 项） |
+| `tests/probe.test.mjs` | 探测客户端测试：指纹、stdio 子进程（真实 spawn）、HTTP JSON/SSE、鉴权失败、stderr 诊断、token 公式（6 项） |
 | `tests/fixtures/mcp-stdio-server.mjs` | 测试用最小 stdio MCP server（分页 tools/list） |
 | `tests/compat.test.mjs` | 兼容声明回归：peer 范围存在、engines 与之一致、testedWith 合法、脚本退出码（5 项） |
+| `tests/locale.test.mjs` | 语言包与打包边界回归：`meta` 结构、`locale/` 目录纯净、无 `._*`、`files` 无通配、图标存在（6 项） |
 | `scripts/check-compat.mjs` | `npm run compat`：比对运行中的 DSH 版本与实测清单，未实测则打印复验清单并退出 1 |
-| `locale/{zh,en}.json` | 插件管理页用的展示文案 |
+| `locale/{zh,en}.json` | 插件管理页用的展示文案（**必须含 `meta.title` / `meta.description`**，见下节） |
 | `AGENTS.md` | 项目级 agent 指令：启动自检、硬约定、验证矩阵、发版流程、交接纪律 |
 | `docs/HANDOFF.md` | 会话交接日志（倒序追加，状态类信息以它为准） |
 
 ## 测试
 
 ```bash
-npm test            # 35 项：客户端行为 11 + 宿主路由 13 + 探测客户端 6 + 兼容声明 5
+npm test            # 43 项：客户端行为 12 + 宿主路由 14 + 探测客户端 6 + 兼容声明 5 + 语言包/打包 6
 npm run compat      # 本机 DSH 版本是否在实测清单里
 ```
 
@@ -181,7 +257,7 @@ npm run compat      # 本机 DSH 版本是否在实测清单里
 跑真实的 `apply()` 与 store；宿主测试用假的 `loader` / `tools` / `webServer` 跑真实的 `apply()`
 并直接调用注册出来的 HTTP handler；探测测试用真实的子进程与本地 HTTP 服务。覆盖：只挑 MCP 行、
 未知行回退成 patch id、四种宿主结果、工具映射与参数、密钥不泄漏、关停时的缓存收缩、
-回环/跨站围栏、自动探测与失败重试、缓存复用与配置失效。
+回环/跨站围栏、自动探测与失败重试、缓存复用与配置失效、token 估算公式与展示。
 
 ## 为什么有的行"被覆盖"、开不动
 
@@ -212,6 +288,8 @@ bundle 层（dsh.profile.bundles 顺序） → profile 的 cordis.patch.yml
 
 ## 排查
 
+- 插件管理页标题显示成包名 `@local/dsh-mcp-switch`：语言包缺 `meta.title` / `meta.description`（见「语言包与打包边界」）。
+- 插件管理页显示「包元信息错误」：`locale/` 里混进了非语言包文件，最常见是 macOS 拷目录留下的 `._en.json`；`find <包目录> -name '._*' -delete` 后刷新页面即可。
 - 页面不出现：`cordis_inspect_query` 查 client `Slots.listSubTree` 的
   `settings.section` occupants 里有没有 `mcp-switch`；没有就说明 client 半边没加载
   （看 `dsh.client` 清单与浏览器 console 的 slot 报错）。

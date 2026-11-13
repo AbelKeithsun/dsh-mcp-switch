@@ -34,7 +34,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { configFingerprint, probeServer } from './probe.js'
+import { configFingerprint, estimateToolsTokens, probeServer } from './probe.js'
 
 /** The one Loader module that carries MCP server rows. */
 const MCP_MODULE = '@deepseek-ai/dsh-mcp-client'
@@ -49,7 +49,7 @@ const PROBE_ROUTE = '/api/mcp-switch/probe'
 const TOOL_PREFIX = 'mcp__'
 
 /** Probe cache shape version; a bump discards older files. */
-const PROBE_CACHE_VERSION = 1
+const PROBE_CACHE_VERSION = 2
 
 /** Request body ceiling for the probe route. */
 const MAX_PROBE_BODY_BYTES = 4096
@@ -194,7 +194,14 @@ async function handleProbe(ctx, probeCache, inflight, request, response) {
   }
   const fingerprint = configFingerprint(config)
   const cached = probeCache[entryId]
-  if (body?.force !== true && cached !== void 0 && cached.fingerprint === fingerprint && cached.tools.length > 0) {
+  if (
+    body?.force !== true &&
+    cached !== void 0 &&
+    cached.fingerprint === fingerprint &&
+    cached.tools.length > 0 &&
+    typeof cached.tokens?.total === 'number' &&
+    cached.instructionsKnown === true
+  ) {
     writeJson(response, 200, { ok: true, source: 'cache', probe: publicProbe(cached) })
     return
   }
@@ -210,7 +217,11 @@ async function handleProbe(ctx, probeCache, inflight, request, response) {
       serverName: typeof config.serverName === 'string' ? config.serverName : '',
       protocolVersion: result.protocolVersion,
       serverInfo: result.serverInfo,
+      capabilities: result.capabilities,
+      instructions: result.instructions,
       tools: result.tools,
+      tokens: result.tokens,
+      instructionsKnown: true,
       probedAt: Date.now(),
     }
     probeCache[entryId] = probe
@@ -237,18 +248,29 @@ function findMcpEntry(ctx, entryId) {
 }
 
 /**
- * Resolve one row's effective MCP client config. A running row exposes its
- * resolved config on the Fiber; a disabled row is interpolated from the raw
- * patch, including YAML `!!js` expressions (e.g. a token from `process.env`).
+ * Resolve one row's effective MCP client config.
+ *
+ * The Loader keeps the **raw** patch config on the entry (`options.config`)
+ * and on its fiber (`fiber.config`): YAML `!!js` expression nodes such as
+ * `Authorization: !!js "'Bearer ' + token"` are still `{ __jsExpr }` objects
+ * there. Only the copy the Loader hands to the plugin (`fiber.effectiveConfig`)
+ * is interpolated. The MCP client itself gets that resolved copy, so the
+ * preview must resolve the same way — otherwise the probe would send the
+ * header value as the string "[object Object]" and every authenticated server
+ * would answer 401.
+ *
+ * Interpolating the entry's raw config keeps one source of truth for enabled
+ * and disabled rows, so the config fingerprint (and therefore the disk cache)
+ * stays stable while a row is toggled.
  * @param {object} entry - a Loader entry.
  * @returns {object|undefined} the config to connect with.
  */
 function resolveServerConfig(entry) {
-  const running = entry.fiber?.config
-  if (isRecord(running)) return running
   const raw = entry.options?.config
-  if (raw === void 0) return void 0
-  return interpolateConfig(entry, raw)
+  if (isRecord(raw)) return interpolateConfig(entry, raw)
+  const effective = entry.fiber?.effectiveConfig
+  if (isRecord(effective)) return effective
+  return void 0
 }
 
 /** Recursively replace `!!js` expression nodes using the Loader's evaluator. */
@@ -291,9 +313,14 @@ function collectServers(ctx, lastSeen, probeCache) {
   let cacheChanged = false
   for (const entry of loader.entries()) {
     if (entry.options?.name !== MCP_MODULE) continue
-    const config = isRecord(entry.options.config) ? entry.options.config : {}
+    // Use the same resolved config the probe route connects with, so the
+    // fingerprint of a live row matches the probe cache entry (raw `!!js`
+    // nodes would hash differently and make every GET look like a config edit).
+    const config = resolveServerConfig(entry) ?? (isRecord(entry.options.config) ? entry.options.config : {})
     const serverName = typeof config.serverName === 'string' ? config.serverName : ''
-    const tools = serverName === '' ? [] : readTools(schemas, serverName)
+    const projected = serverName === '' ? { rows: [], toolsTokens: 0 } : readTools(schemas, serverName)
+    const tools = projected.rows
+    const toolsTokens = projected.toolsTokens
     // Toggling a server off unregisters its tools one by one, and each
     // unregister emits `tools/change`. Remembering every intermediate state
     // would leave the cache at one tool, so a shrinking live set only marks the
@@ -324,12 +351,22 @@ function collectServers(ctx, lastSeen, probeCache) {
         const signature = tools.map((tool) => tool.name).join('\u0000')
         const storedSignature = stored === void 0 ? '' : stored.tools.map((tool) => tool.name).join('\u0000')
         if (!sameConfig || storedSignature !== signature) {
+          const cachedInstructions = sameConfig ? stored.instructions : undefined
+          const instructionsTokens = cachedInstructions?.tokens ?? 0
           probeCache[entry.id] = {
             fingerprint,
             serverName,
             protocolVersion: stored?.protocolVersion ?? '',
             serverInfo: stored?.serverInfo ?? {},
+            capabilities: sameConfig ? stored.capabilities : undefined,
+            instructions: cachedInstructions,
             tools,
+            tokens: {
+              tools: toolsTokens,
+              instructions: instructionsTokens,
+              total: toolsTokens + instructionsTokens,
+            },
+            instructionsKnown: sameConfig && stored.instructionsKnown === true,
             probedAt: Date.now(),
           }
           cacheChanged = true
@@ -338,7 +375,10 @@ function collectServers(ctx, lastSeen, probeCache) {
     }
     const probe = probeCache[entry.id]
     const probeValid =
-      probe !== void 0 && probe.tools.length > 0 && probe.fingerprint === configFingerprint(isRecord(config) ? config : {})
+      probe !== void 0 &&
+      probe.tools.length > 0 &&
+      typeof probe.tokens?.total === 'number' &&
+      probe.fingerprint === configFingerprint(isRecord(config) ? config : {})
     servers.push({
       entryId: entry.id,
       serverName,
@@ -359,6 +399,10 @@ function collectServers(ctx, lastSeen, probeCache) {
 function publicProbe(probe) {
   return {
     tools: probe.tools,
+    tokens: probe.tokens,
+    instructionsKnown: probe.instructionsKnown === true,
+    capabilities: probe.capabilities ?? {},
+    instructions: probe.instructions ?? { preview: '', chars: 0, tokens: 0 },
     probedAt: probe.probedAt,
     protocolVersion: probe.protocolVersion,
     serverInfo: probe.serverInfo,
@@ -467,8 +511,17 @@ function readSchemas(ctx) {
 function readTools(schemas, serverName) {
   const prefix = TOOL_PREFIX + serverName + '__'
   const rows = []
+  const wireTools = []
   for (const schema of schemas) {
     if (typeof schema?.name !== 'string' || !schema.name.startsWith(prefix)) continue
+    // The model-facing schema is exactly what `ctx.tools.schemas()` exposes:
+    // name, description and the parameter JSON Schema.
+    const wire = {
+      name: schema.name,
+      description: typeof schema.description === 'string' ? schema.description : '',
+      parameters: schema.parameters ?? { type: 'object', properties: {} },
+    }
+    wireTools.push(wire)
     rows.push({
       // The public suffix is the model-facing name minus the server namespace.
       // A raw MCP name that had to be normalized keeps its hash suffix here;
@@ -476,12 +529,13 @@ function readTools(schemas, serverName) {
       // by the MCP client's naming contract.
       name: schema.name.slice(prefix.length) || schema.name,
       publicName: schema.name,
-      description: truncate(typeof schema.description === 'string' ? schema.description : ''),
+      description: truncate(wire.description),
       parameters: readParameters(schema.parameters),
+      tokens: Math.ceil(JSON.stringify(wire).length / 4),
     })
   }
   rows.sort((left, right) => left.name.localeCompare(right.name))
-  return rows
+  return { rows, toolsTokens: estimateToolsTokens(wireTools) }
 }
 
 /**

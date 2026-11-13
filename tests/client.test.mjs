@@ -404,6 +404,33 @@ test('an unreachable preview route never disables the switches', async () => {
   }
 })
 
+/** Find the first fake React element matching a predicate. */
+function findElement(node, predicate) {
+  if (node === null || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, predicate)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (predicate(node)) return node
+  return findElement(node.children, predicate)
+}
+
+/** Render a row as if the user expanded it (the fake React holds no state). */
+function renderExpandedRow(page, t) {
+  const row = findElement(page, (element) => typeof element.type === 'function' && element.type.name === 'Row')
+  assert.ok(row, 'row element not found')
+  const original = React.useState
+  React.useState = () => [true, () => {}]
+  try {
+    return textOf(row.type({ ...row.props, t }))
+  } finally {
+    React.useState = original
+  }
+}
+
 /** Poll until a predicate holds (the page's auto-probe runs asynchronously). */
 async function waitFor(predicate, timeout = 3000) {
   const started = Date.now()
@@ -458,7 +485,14 @@ test('a server that was never enabled is probed and previewed before the switch'
       ],
       probe: {
         probe: {
-          tools: [{ name: 'alpha', description: 'First fixture tool', parameters: [] }],
+          tools: [{ name: 'alpha', description: 'First fixture tool', parameters: [], tokens: 120 }],
+          tokens: { tools: 2000, instructions: 400, total: 2400 },
+          capabilities: { tools: true, resources: true },
+          instructions: {
+            preview: 'Fixture instructions: use alpha first.',
+            chars: 40,
+            tokens: 400,
+          },
           probedAt: 1700000000000,
           serverInfo: { name: 'fixture-stdio', version: '1.2.3' },
           protocolVersion: '2025-06-18',
@@ -483,6 +517,15 @@ test('a server that was never enabled is probed and previewed before the switch'
     assert.match(page, /probedAt/)
     assert.ok(calls.some(([, method]) => method === 'POST'), 'the page must probe without enabling the server')
     assert.equal(store.getSnapshot().servers[0].enabled, false)
+    assert.match(page, /tokensEstimate .*≈2\.4K tokens/)
+    assert.match(page, /resources/)
+
+    const expanded = renderExpandedRow(Component({ t: (key) => key, store }), (key) => key)
+    assert.match(expanded, /tokenBreakdownTools/)
+    assert.match(expanded, /tokenBreakdownInstructions/)
+    assert.match(expanded, /instructionsHeading/)
+    assert.match(expanded, /Fixture instructions: use alpha first/)
+    assert.match(expanded, /≈120 tokens/)
   } finally {
     clearBrowserStubs(saved)
   }
@@ -523,6 +566,55 @@ test('a failed probe surfaces its reason and offers a retry', async () => {
     assert.match(page, /reread/)
     // The switch itself stays usable.
     assert.equal(store.getSnapshot().servers[0].locked, false)
+  } finally {
+    clearBrowserStubs(saved)
+  }
+})
+
+
+test('a cached probe from a previous visit is used without reconnecting', async () => {
+  const saved = { fetch: globalThis.fetch, localStorage: globalThis.localStorage }
+  try {
+    stubStorage()
+    const calls = stubPreviewAndProbe({
+      servers: [
+        {
+          entryId: 'include:mcp-fixture',
+          serverName: 'fixture',
+          transport: 'stdio',
+          enabled: false,
+          tools: [],
+          probe: {
+            tools: [{ name: 'alpha', description: 'First fixture tool', parameters: [], tokens: 120 }],
+            tokens: { tools: 2000, instructions: 400, total: 2400 },
+            instructionsKnown: true,
+            capabilities: { tools: true },
+            instructions: { preview: 'Cached guidance.', chars: 16, tokens: 400 },
+            probedAt: 1700000000000,
+            protocolVersion: '2025-06-18',
+            serverInfo: { name: 'fixture-stdio', version: '1.2.3' },
+          },
+        },
+      ],
+      probe: { error: 'should not be called' },
+    })
+    const { store } = await mount({
+      pluginManager: {
+        listPlugins: async () => ({
+          ok: true,
+          value: [pluginInfo('include:mcp-fixture', MCP, { patchId: 'mcp-fixture', enabled: false })],
+        }),
+      },
+    })
+    await store.load()
+    await store.loadPreview()
+    await store.autoProbe()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    assert.equal(calls.some(([, method]) => method === 'POST'), false)
+    const probe = store.getSnapshot().preview['include:mcp-fixture'].probe
+    assert.equal(probe.tokens.total, 2400)
+    assert.equal(probe.capabilities.tools, true)
   } finally {
     clearBrowserStubs(saved)
   }

@@ -7,15 +7,22 @@
  *   npm run compat -- 0.3.0-rc.1      # 指定版本（升级前预演）
  *   DSH_RUNTIME_VERSION=0.3.0-rc.1 npm run compat
  *
- * 背景：DSH 的兼容校验（@deepseek-ai/dsh-app-boot 的 evaluatePluginCompatibility）
- * 只读 package.json 的 `peerDependencies` 里 `@deepseek-ai/dsh` 与
- * `@deepseek-ai/dsh-*` 的 semver 范围；`engines` / `dsh.engines` 都不参与校验。
+ * 背景：DSH 的兼容校验（@deepseek-ai/dsh-app-boot 的 evaluatePluginCompatibility）：
+ * manifest 顶层 `engines.dsh` 一票决定（存在时 peerDependencies 被忽略）；否则逐条校验
+ * `peerDependencies` 里 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 的 semver 范围，
+ * 比较时带 `includePrerelease`（所以 `^0.2.0-rc.2` 放行 0.2.2-rc.2）。
+ * 本插件没有顶层 `engines`，只有展示用的 `dsh.engines`，实际参与校验的是 peerDependencies。
  * 本脚本校验的是"跑过的版本清单"（dsh.testedWith），它比 semver 范围更严格：
  * 范围决定 DSH 会不会拒绝加载，清单决定我们有没有真的验证过。
+ *
+ * 版本探测顺序：命令行参数 → DSH_RUNTIME_VERSION → 安装清单（app-boot / CLI 的 package.json，
+ * DSH 自己的 getDshRuntimeVersion 读的就是 app-boot）→ 桌面外壳清单（runtime.json 的
+ * desktopVersion，**可能与 CLI 版本不同**，只能兜底）→ 未知。
  *
  * 退出码：0 = 运行版本在实测清单内；1 = 不在，需要复验；2 = 探测不到运行版本。
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -28,15 +35,65 @@ const clientPeers = Object.keys(peers).filter(
   (name) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'),
 )
 
-/** 运行中的 DSH 版本：命令行参数 → 环境变量 → 运行时清单 → 未知。 */
+/**
+ * 读一个 JSON 清单。装在 app.asar 里的清单普通 node 读不到
+ * （asar 是单文件归档），此时改用运行中的 Electron 以 ELECTRON_RUN_AS_NODE 读。
+ * @param {string} file - 清单路径。
+ * @returns {object | undefined} 解析后的清单；读不到返回 undefined。
+ */
+function readManifest(file) {
+  const direct = (() => {
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'))
+    } catch {
+      return undefined
+    }
+  })()
+  if (direct !== undefined) return direct
+  const exec = process.env.DSH_NODE_EXECUTABLE
+  if (typeof exec !== 'string' || exec === '' || !existsSync(exec)) return undefined
+  const script = 'const fs=require("node:fs");process.stdout.write(fs.readFileSync(process.argv[1],"utf8"))'
+  const result = spawnSync(exec, ['-e', script, file], {
+    encoding: 'utf8',
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  })
+  if (result.status !== 0 || typeof result.stdout !== 'string' || result.stdout.trim() === '') return undefined
+  try {
+    return JSON.parse(result.stdout)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 候选清单：app-boot 是 DSH 判定运行版本时读的那份，CLI 包是其次。
+ * @returns {Array<{ file: string, label: string }>} 候选清单路径。
+ */
+function installedManifests() {
+  const installDir = process.env.DSH_INSTALL_DIR
+  if (typeof installDir !== 'string' || installDir === '') return []
+  return [
+    { file: join(installDir, '..', 'dsh-app-boot', 'package.json'), label: '安装清单 app-boot' },
+    { file: join(installDir, 'package.json'), label: '安装清单 CLI' },
+  ]
+}
+
+/** 运行中的 DSH 版本：命令行参数 → 环境变量 → 安装清单 → 外壳清单 → 未知。 */
 function resolveRuntime() {
   const argument = process.argv[2]
   if (typeof argument === 'string' && argument.trim() !== '') {
-    return { version: argument.trim(), source: '命令行参数' }
+    return { version: argument.trim(), source: '命令行参数', exact: true }
   }
   const fromEnv = process.env.DSH_RUNTIME_VERSION
   if (typeof fromEnv === 'string' && fromEnv.trim() !== '') {
-    return { version: fromEnv.trim(), source: 'DSH_RUNTIME_VERSION' }
+    return { version: fromEnv.trim(), source: 'DSH_RUNTIME_VERSION', exact: true }
+  }
+  for (const candidate of installedManifests()) {
+    const manifest = readManifest(candidate.file)
+    const version = manifest?.version
+    if (typeof version === 'string' && version !== '') {
+      return { version, source: `${candidate.label} ${candidate.file}`, exact: true }
+    }
   }
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const root = join(home, 'dsh-runtimes')
@@ -50,11 +107,13 @@ function resolveRuntime() {
       } catch {
         continue
       }
-      const version = parsed.desktopVersion ?? parsed.dshVersion ?? parsed.runtimeVersion
-      if (typeof version === 'string' && version !== '') return { version, source: file }
+      const version = parsed.dshVersion ?? parsed.runtimeVersion ?? parsed.desktopVersion
+      if (typeof version === 'string' && version !== '') {
+        return { version, source: `${file}（桌面外壳版本，可能与 CLI 不同）`, exact: false }
+      }
     }
   }
-  return { version: undefined, source: '未找到（可用参数或 DSH_RUNTIME_VERSION 指定）' }
+  return { version: undefined, source: '未找到（可用参数或 DSH_RUNTIME_VERSION 指定）', exact: false }
 }
 
 /** profile 里已授予的精确版本豁免，直接决定"不兼容还能不能跑"。 */
@@ -79,7 +138,7 @@ console.log(`插件          ${pkg.name}@${pkg.version}`)
 console.log(`运行中的 DSH  ${runtime.version ?? '(未知)'}   ← ${short(runtime.source)}`)
 console.log(`peer 声明     ${runtimePeerRange ?? '(未声明，DSH 将跳过兼容校验)'}`)
 if (clientPeers.length > 1) console.log(`              其它 peer: ${clientPeers.slice(1).join(', ')}`)
-if (enginesRange !== undefined) console.log(`dsh.engines   ${enginesRange}（生态展示用，DSH 不校验）`)
+if (enginesRange !== undefined) console.log(`dsh.engines   ${enginesRange}（展示用；DSH 只看顶层 engines，本插件没有）`)
 console.log(`实测清单      ${tested.length === 0 ? '(空)' : tested.join(', ')}`)
 if (exemptions.length > 0) {
   console.log('已授豁免      ' + exemptions.map(([key, versions]) => `${key} @ ${versions.join('/')}`).join('  '))
@@ -98,6 +157,9 @@ if (tested.includes(runtime.version)) {
 }
 
 console.log(`\n结果          ✘ ${runtime.version} 不在实测清单里 —— 升级后需要复验再放宽声明。`)
+if (!runtime.exact) {
+  console.log('              （本次版本来自桌面外壳清单，若与 CLI 版本不一致，以 CLI 版本为准）')
+}
 console.log(`
 复验清单（任一接口变了就要改代码并重新实测）：
   1. 客户端模块格式：window.__ModuleLoader__.load({ id, factory }) 是否仍是浏览器半边的加载约定。
